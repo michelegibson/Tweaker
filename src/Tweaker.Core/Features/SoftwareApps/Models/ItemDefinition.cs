@@ -1,0 +1,65 @@
+using System.Collections.Generic;
+using Tweaker.Core.Features.Common.Enums;
+using Tweaker.Core.Features.Common.Models;
+using Tweaker.Core.Features.SoftwareApps.Enums;
+
+namespace Tweaker.Core.Features.SoftwareApps.Models;
+
+public record ItemDefinition : BaseDefinition
+{
+    // Immutable definition properties
+    public new InputType InputType { get; init; } = InputType.CheckBox;
+    public string[]? AppxPackageName { get; init; }
+    public string[]? WinGetPackageId { get; init; }
+    public string? MsStoreId { get; init; }
+    public string? CapabilityName { get; init; }
+    public string? OptionalFeatureName { get; init; }
+    public string? ChocoPackageId { get; init; }
+    /// <summary>
+    /// When set, replaces the winget manifest's InstallerSwitches entirely via `winget install --override "<value>"`.
+    /// Use to work around upstream manifests that pass broken switches to the underlying installer.
+    /// </summary>
+    public string? WinGetInstallerOverride { get; init; }
+    public bool CanBeReinstalled { get; init; } = true;
+    public bool RequiresReboot { get; init; }
+    public Func<string>? RemovalScript { get; init; }
+    /// <summary>
+    /// Pattern for registry DisplayName matching. Supports {version}, {arch}, {locale} placeholders.
+    /// When set, compared against registry DisplayNames.
+    /// </summary>
+    public string? RegistryDisplayName { get; init; }
+    /// <summary>
+    /// Pattern for registry SubKeyName matching. Supports {version}, {arch}, {locale} placeholders.
+    /// When set, compared against registry SubKeyNames (including SystemComponent=1 entries).
+    /// </summary>
+    public string? RegistrySubKeyName { get; init; }
+    /// <summary>
+    /// Paths to check for existence (file or directory) as a detection fallback.
+    /// Supports environment variables (e.g. %USERPROFILE%).
+    /// </summary>
+    public string[]? DetectionPaths { get; init; }
+    public string[]? ProcessesToStop { get; init; }
+    public string? WebsiteUrl { get; init; }
+    /// <summary>
+    /// Marks the item as carrying a meaningful uninstall risk (e.g. Microsoft Edge:
+    /// removing it may break Windows components that depend on it). When true, the
+    /// Card view renders an Amber "Warning" pill next to the name; the pill's
+    /// tooltip shows a generic instability message sourced from localization, so
+    /// the same flag is reusable across packages without per-item warning text.
+    /// </summary>
+    public bool HasInstabilityWarning { get; init; }
+    public ExternalAppMetadata? ExternalApp { get; init; }
+
+    // Mutable runtime state — set by WindowsAppsViewModel/ExternalAppsViewModel
+    // via the relevant service (status discovery, icon resolver), proxied
+    // through AppItemViewModel for UI binding.
+    public bool IsInstalled { get; set; }
+    public DetectionSource DetectedVia { get; set; }
+
+    /// <summary>
+    /// Absolute path to the cached icon PNG, or null if no icon is available.
+    /// Populated by IAppIconResolver from WindowsAppsViewModel after install-status
+    /// discovery; null for capabilities, optional features, and not-installed AppX entries.
+    /// </summary>
+    public string? IconPath { get; set; }
+}

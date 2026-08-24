@@ -1,0 +1,165 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Tweaker.Core.Features.Common.Events;
+using Tweaker.Core.Features.Common.Interfaces;
+using Tweaker.Infrastructure.Features.Common.Events;
+using Tweaker.Infrastructure.Features.Common.EventHandlers;
+using Tweaker.Infrastructure.Features.Common.Services;
+
+namespace Tweaker.Infrastructure.Extensions.DI;
+
+/// <summary>
+/// Extension methods for registering infrastructure services.
+/// </summary>
+public static class InfrastructureServicesExtensions
+{
+    /// <summary>
+    /// Registers infrastructure services for the Tweaker application.
+    /// </summary>
+    /// <param name="services">The service collection to configure</param>
+    /// <returns>The service collection for method chaining</returns>
+    public static IServiceCollection AddInfrastructureServices(this IServiceCollection services)
+    {
+        // Core Infrastructure Services (Singleton - Cross-cutting concerns)
+        services.AddSingleton<IConfigImportState, ConfigImportState>();
+        services.AddSingleton<IProcessExecutor, ProcessExecutor>();
+        services.AddSingleton<ILogService, Tweaker.Core.Features.Common.Services.LogService>();
+        services.AddSingleton<IInteractiveUserService, InteractiveUserService>();
+        services.AddSingleton<ISystemInfoProvider, SystemInfoProvider>();
+        services.AddSingleton<IWindowsRegistryService, WindowsRegistryService>();
+        // Dependency Manager
+        services.AddSingleton<IDependencyManager, Tweaker.Core.Features.Common.Services.DependencyManager>();
+
+        // Windows Services
+        services.AddSingleton<IWindowsVersionService, WindowsVersionService>();
+        services.AddSingleton<IWindowsUIManagementService, WindowsUIManagementService>();
+
+        // User Preferences Service
+        services.AddSingleton<IUserPreferencesService, UserPreferencesService>();
+
+        // New Badge Service (tracks which settings are new in current release)
+        services.AddSingleton<INewBadgeService, NewBadgeService>();
+
+        // Localization Service
+        services.AddSingleton<ILocalizationService, LocalizationService>();
+
+        // Event Bus (Singleton - Message routing)
+        services.AddSingleton<IEventBus, EventBus>();
+
+        // Initialization Service
+        services.AddSingleton<IInitializationService, Tweaker.Core.Features.Common.Services.InitializationService>();
+
+        // Settings Registry
+        services.AddSingleton<IGlobalSettingsRegistry, Tweaker.Core.Features.Common.Services.GlobalSettingsRegistry>();
+
+        // Global Settings Preloader (registers bypassed settings in the global registry)
+        services.AddSingleton<IGlobalSettingsPreloader, GlobalSettingsPreloader>();
+
+        // File System Service
+        services.AddSingleton<IFileSystemService, FileSystemService>();
+
+        // Power Scheme Operations (P/Invoke wrapper for plan-level power operations)
+        services.AddSingleton<IPowerSchemeOperations, PowerSchemeOperations>();
+
+        // Explorer Window Manager (open/focus folders in Explorer)
+        services.AddSingleton<IExplorerWindowManager, ExplorerWindowManager>();
+
+        // User-facing change receipt (ChangeHistory.txt)
+        services.AddSingleton<IChangeHistoryService, ChangeHistoryService>();
+
+        // System Parameters (wraps User32 SystemParametersInfo P/Invoke)
+        services.AddSingleton<ISystemParametersService, SystemParametersService>();
+
+        // PowerShell Runner
+        services.AddSingleton<IPowerShellRunner, Tweaker.Infrastructure.Features.Common.Utilities.PowerShellRunner>();
+
+        // Driver Categorizer
+        services.AddSingleton<Tweaker.Core.Features.AdvancedTools.Interfaces.IDriverCategorizer,
+            Tweaker.Infrastructure.Features.AdvancedTools.Helpers.DriverCategorizer>();
+
+        // Settings Discovery and Application
+        // SystemSettingsDiscoveryService depends on ISpecialDiscoveryRegistry.
+        // The UI composition root re-registers that registry (in AddSettingServices)
+        // with the real handler set (PowerService, UpdateService); because that runs
+        // after AddInfrastructureServices, the richer registration wins in the app.
+        // TryAdd here provides an empty default so the infrastructure container is
+        // self-contained when composed on its own (e.g. integration smoke tests).
+        services.TryAddSingleton<ISpecialDiscoveryRegistry>(_ =>
+            new SpecialDiscoveryRegistry([]));
+        // SettingApplicationService also depends on the ISpecialSettingHandlerRegistry
+        // dispatcher registry, re-registered by the UI composition root with the real
+        // handler set. Same TryAdd-default rationale as ISpecialDiscoveryRegistry above.
+        services.TryAddSingleton<ISpecialSettingHandlerRegistry>(_ =>
+            new SpecialSettingHandlerRegistry(new Dictionary<string, ISpecialSettingHandler>()));
+        services.AddSingleton<ISystemSettingsDiscoveryService, SystemSettingsDiscoveryService>();
+        services.AddSingleton<IProcessRestartManager, ProcessRestartManager>();
+        services.AddSingleton<IPowerCfgApplier, PowerCfgApplier>();
+        services.AddSingleton<ISettingDependencyResolver, SettingDependencyResolver>();
+        services.AddSingleton<IRecommendedSettingsApplier, RecommendedSettingsApplier>();
+        services.AddSingleton<IBulkSettingsActionService, BulkSettingsActionService>();
+        services.AddSingleton<ISettingOperationExecutor, SettingOperationExecutor>();
+        services.AddSingleton<ISettingApplicationService, SettingApplicationService>();
+
+        // ComboBox Services
+        services.AddSingleton<IComboBoxSetupService, ComboBoxSetupService>();
+        services.AddSingleton<IComboBoxResolver, ComboBoxResolver>();
+        services.AddSingleton<IPowerPlanComboBoxService, PowerPlanComboBoxService>();
+
+        // Settings Compatibility
+        services.AddSingleton<ICompatibleSettingsRegistry, CompatibleSettingsRegistry>();
+        services.AddSingleton<IWindowsCompatibilityFilter, WindowsCompatibilityFilter>();
+        services.AddSingleton<IHardwareCompatibilityFilter, HardwareCompatibilityFilter>();
+        services.AddSingleton<IHardwareDetectionService, HardwareDetectionService>();
+
+        // Script Services
+        services.AddSingleton<IPowerSettingsQueryService, PowerSettingsQueryService>();
+        services.AddSingleton<IPowerSettingsValidationService, PowerSettingsValidationService>();
+
+        // System Services
+        services.AddSingleton<IScheduledTaskService, ScheduledTaskService>();
+        services.AddSingleton<ISystemBackupService, SystemBackupService>();
+        services.AddSingleton<ISystemRestoreService, SystemRestoreService>();
+        services.AddSingleton<IVersionService, VersionService>();
+
+        // Script Services
+        services.AddSingleton<IScriptMigrationService, ScriptMigrationService>();
+        services.AddSingleton<IRemovalScriptUpdateService, RemovalScriptUpdateService>();
+
+        // Task Progress Service
+        services.AddSingleton<TaskProgressService>();
+        services.AddSingleton<ITaskProgressService>(sp => sp.GetRequiredService<TaskProgressService>());
+        services.AddSingleton<IMultiScriptProgressService>(sp => sp.GetRequiredService<TaskProgressService>());
+
+        // Tooltip Services
+        services.AddSingleton<ITooltipDataService, TooltipDataService>();
+        services.AddSingleton<TooltipRefreshEventHandler>();
+
+        // Configuration Application Bridge (for config import/export)
+        services.AddSingleton<IConfigurationApplicationBridgeService, ConfigurationApplicationBridgeService>();
+
+        // Policy Cleanup Service (for Windows Defaults import)
+        services.AddSingleton<IPolicyCleanupService, PolicyCleanupService>();
+
+        // Configuration Migration (for backward-compatible config imports)
+        services.AddSingleton<IConfigMigrationService, ConfigMigrationService>();
+
+        // Advanced Tools Services — DISM Process Runner (shared utility)
+        services.AddSingleton<IDismProcessRunner, DismProcessRunner>();
+
+        // Advanced Tools Services — WIM/ISO decomposed services
+        services.AddSingleton<Tweaker.Core.Features.AdvancedTools.Interfaces.IWimImageService,
+            Tweaker.Infrastructure.Features.AdvancedTools.Services.WimImageService>();
+        services.AddSingleton<Tweaker.Core.Features.AdvancedTools.Interfaces.IOscdimgToolManager,
+            Tweaker.Infrastructure.Features.AdvancedTools.Services.OscdimgToolManager>();
+        services.AddSingleton<Tweaker.Core.Features.AdvancedTools.Interfaces.IIsoService,
+            Tweaker.Infrastructure.Features.AdvancedTools.Services.IsoService>();
+        services.AddSingleton<Tweaker.Core.Features.AdvancedTools.Interfaces.IWimCustomizationService,
+            Tweaker.Infrastructure.Features.AdvancedTools.Services.WimCustomizationService>();
+        services.AddSingleton<Tweaker.Infrastructure.Features.AdvancedTools.Services.AutounattendScriptBuilder>();
+
+        // Http Client
+        services.TryAddSingleton<System.Net.Http.HttpClient>();
+
+        return services;
+    }
+}

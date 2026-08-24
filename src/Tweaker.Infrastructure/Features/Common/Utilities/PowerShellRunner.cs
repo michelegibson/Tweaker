@@ -1,0 +1,322 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Tweaker.Core.Features.Common.Enums;
+using Tweaker.Core.Features.Common.Exceptions;
+using Tweaker.Core.Features.Common.Interfaces;
+using Tweaker.Core.Features.Common.Models;
+
+namespace Tweaker.Infrastructure.Features.Common.Utilities;
+
+public class PowerShellRunner : IPowerShellRunner
+{
+    private const string PowerShellPath = @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+
+    // Windows command-line size limit is ~32,767 chars. base64-encoded UTF-16-LE
+    // is ~4 chars per 2 bytes of script, so the effective script-size limit before
+    // encoding is roughly 24 KB. We cap below that to give headroom for the
+    // surrounding `-ExecutionPolicy Bypass -NoProfile -EncodedCommand ` prefix
+    // (~50 chars) and any future arg additions.
+    private const int MaxEncodedScriptBytes = 24_000;
+
+    private static readonly Regex PercentRegex = new(@"(\d+(?:\.\d+)?)%", RegexOptions.Compiled);
+    private readonly IFileSystemService _fileSystemService;
+
+    public PowerShellRunner(IFileSystemService fileSystemService)
+    {
+        _fileSystemService = fileSystemService;
+    }
+
+    /// <summary>
+    /// Executes a PowerShell script string via Windows PowerShell 5.1 (powershell.exe).
+    /// The script is written to a temp file, executed, and the temp file is cleaned up.
+    /// Stdout is captured line-by-line for progress reporting (Write-Host output).
+    /// </summary>
+    public async Task<string> RunScriptAsync(
+        string script,
+        IProgress<TaskProgressDetail>? progress = null,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(script))
+            throw new ArgumentException("Script cannot be null or empty.", nameof(script));
+
+        var tempFile = _fileSystemService.CombinePath(_fileSystemService.GetTempPath(), $"tweaker_{Guid.NewGuid()}.ps1");
+        try
+        {
+            await _fileSystemService.WriteAllTextAsync(tempFile, script, ct).ConfigureAwait(false);
+            return await RunScriptFileAsync(tempFile, "", progress, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            try { _fileSystemService.DeleteFile(tempFile); }
+            catch { /* best effort cleanup */ }
+        }
+    }
+
+    /// <summary>
+    /// Executes a short PowerShell script string entirely in memory via
+    /// <c>powershell.exe -EncodedCommand &lt;base64&gt;</c>. No temp file is written.
+    /// The script is encoded as UTF-16-LE then base64 (the format -EncodedCommand expects).
+    /// Throws <see cref="ArgumentException"/> if the script exceeds
+    /// <see cref="MaxEncodedScriptBytes"/> bytes (UTF-16); use
+    /// <see cref="RunScriptAsync"/> for larger scripts.
+    /// </summary>
+    public async Task<string> RunScriptInMemoryAsync(
+        string script,
+        IProgress<TaskProgressDetail>? progress = null,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(script))
+            throw new ArgumentException("Script cannot be null or empty.", nameof(script));
+
+        var scriptBytes = Encoding.Unicode.GetBytes(script);
+        if (scriptBytes.Length > MaxEncodedScriptBytes)
+        {
+            throw new ArgumentException(
+                $"Script is {scriptBytes.Length} bytes (UTF-16); -EncodedCommand path supports up to {MaxEncodedScriptBytes}. Use RunScriptAsync for larger scripts.",
+                nameof(script));
+        }
+
+        var encoded = Convert.ToBase64String(scriptBytes);
+        var args = $"-ExecutionPolicy Bypass -NoProfile -EncodedCommand {encoded}";
+
+        var (output, errors, exitCode) = await LaunchPowerShellAsync(args, progress, ct).ConfigureAwait(false);
+
+        if (exitCode != 0 && errors.Length > 0)
+        {
+            throw new InvalidOperationException(
+                $"In-memory PowerShell script failed (exit code {exitCode}):\n{errors}");
+        }
+
+        return output.ToString();
+    }
+
+    /// <summary>
+    /// Executes a PowerShell script file via Windows PowerShell 5.1 (powershell.exe).
+    /// Stdout is captured line-by-line for progress reporting (Write-Host output).
+    /// If execution policy blocks the script, retries with -EncodedCommand.
+    /// </summary>
+    public async Task<string> RunScriptFileAsync(
+        string scriptPath,
+        string arguments = "",
+        IProgress<TaskProgressDetail>? progress = null,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(scriptPath))
+            throw new ArgumentException("Script path cannot be null or empty.", nameof(scriptPath));
+
+        if (!_fileSystemService.FileExists(scriptPath))
+            throw new FileNotFoundException($"PowerShell script file not found: {scriptPath}");
+
+        var args = string.IsNullOrEmpty(arguments)
+            ? $"-ExecutionPolicy Bypass -NoProfile -File \"{scriptPath}\""
+            : $"-ExecutionPolicy Bypass -NoProfile -File \"{scriptPath}\" {arguments}";
+
+        var (output, errors, exitCode) = await LaunchPowerShellAsync(args, progress, ct).ConfigureAwait(false);
+
+        if (exitCode != 0 && errors.Length > 0)
+        {
+            var errorText = errors.ToString();
+
+            if (IsExecutionPolicyError(errorText) && string.IsNullOrEmpty(arguments))
+            {
+                // Attempt fallback: read script content and re-run as -EncodedCommand
+                var scriptContent = await _fileSystemService.ReadAllTextAsync(scriptPath, ct).ConfigureAwait(false);
+
+                // Guard: Base64 of Unicode doubles size; Windows command line limit ~32K
+                if (scriptContent.Length > 28_000)
+                {
+                    throw new ExecutionPolicyException(
+                        $"Execution policy blocked script and script is too large ({scriptContent.Length} chars) for -EncodedCommand fallback.\n{errorText}");
+                }
+
+                var base64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(scriptContent));
+                var fallbackArgs = $"-ExecutionPolicy Bypass -NoProfile -EncodedCommand {base64}";
+
+                progress?.Report(new TaskProgressDetail
+                {
+                    TerminalOutput = "Execution policy blocked script file. Retrying with -EncodedCommand...",
+                    IsActive = true,
+                    LogLevel = LogLevel.Warning
+                });
+
+                var (retryOutput, retryErrors, retryExitCode) =
+                    await LaunchPowerShellAsync(fallbackArgs, progress, ct).ConfigureAwait(false);
+
+                if (retryExitCode == 0 || retryErrors.Length == 0)
+                    return retryOutput.ToString();
+
+                // Both attempts failed
+                throw new ExecutionPolicyException(
+                    $"Execution policy blocked script file and -EncodedCommand fallback also failed (exit code {retryExitCode}):\n{retryErrors}");
+            }
+
+            throw new InvalidOperationException(
+                $"PowerShell execution failed (exit code {exitCode}):\n{errorText}");
+        }
+
+        return output.ToString();
+    }
+
+    private async Task<(StringBuilder Output, StringBuilder Errors, int ExitCode)> LaunchPowerShellAsync(
+        string arguments, IProgress<TaskProgressDetail>? progress, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = PowerShellPath,
+            Arguments = arguments,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+
+        var output = new StringBuilder();
+        var errors = new StringBuilder();
+
+        using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+            output.AppendLine(e.Data);
+            ReportLine(e.Data, progress, LogLevel.Info);
+        };
+
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+            errors.AppendLine(e.Data);
+            ReportLine(e.Data, progress, LogLevel.Error);
+        };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        using var reg = ct.Register(() =>
+        {
+            try
+            {
+                if (!process.HasExited)
+                    process.Kill(entireProcessTree: true);
+            }
+            catch { /* process may have already exited */ }
+        });
+
+        await process.WaitForExitAsync(ct).ConfigureAwait(false);
+
+        return (output, errors, process.ExitCode);
+    }
+
+    private static bool IsExecutionPolicyError(string errorOutput)
+    {
+        if (string.IsNullOrEmpty(errorOutput)) return false;
+        return errorOutput.Contains("running scripts is disabled", StringComparison.OrdinalIgnoreCase)
+            || errorOutput.Contains("AuthorizationManager check failed", StringComparison.OrdinalIgnoreCase)
+            || errorOutput.Contains("is not digitally signed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Validates a PowerShell script for syntax errors without executing it.
+    /// Uses PowerShell's built-in Parser.ParseFile() API.
+    /// </summary>
+    public async Task ValidateScriptSyntaxAsync(
+        string scriptContent,
+        CancellationToken ct = default)
+    {
+        // Write script to temp file for parsing
+        var tempFile = _fileSystemService.CombinePath(_fileSystemService.GetTempPath(), $"tweaker_validate_{Guid.NewGuid():N}.ps1");
+        try
+        {
+            await _fileSystemService.WriteAllTextAsync(tempFile, scriptContent, ct).ConfigureAwait(false);
+
+            // Use PowerShell's parser to check for syntax errors
+            var parseScript = @"
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile('" + tempFile.Replace("'", "''") + @"', [ref]$null, [ref]$errors)
+if ($errors.Count -gt 0) {
+    foreach ($e in $errors) { Write-Host ""PARSE_ERROR: $($e.ToString())"" }
+    exit 1
+}
+Write-Host 'Script validation passed - no parse errors found'
+exit 0";
+
+            await RunScriptAsync(parseScript, ct: ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            try { _fileSystemService.DeleteFile(tempFile); }
+            catch { /* best effort cleanup */ }
+        }
+    }
+
+    /// <summary>
+    /// Validates an XML string for well-formedness errors without writing it.
+    /// Uses .NET's XmlReader via PowerShell.
+    /// </summary>
+    public async Task ValidateXmlSyntaxAsync(
+        string xmlContent,
+        CancellationToken ct = default)
+    {
+        var tempFile = _fileSystemService.CombinePath(_fileSystemService.GetTempPath(), $"tweaker_validate_{Guid.NewGuid():N}.xml");
+        try
+        {
+            await _fileSystemService.WriteAllTextAsync(tempFile, xmlContent, ct).ConfigureAwait(false);
+
+            var parseScript = @"
+try {
+    $settings = New-Object System.Xml.XmlReaderSettings
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Ignore
+    $reader = [System.Xml.XmlReader]::Create('" + tempFile.Replace("'", "''") + @"', $settings)
+    while ($reader.Read()) { }
+    $reader.Close()
+    Write-Host 'XML validation passed - document is well-formed'
+    exit 0
+} catch {
+    Write-Host ""XML_ERROR: $($_.Exception.Message)""
+    exit 1
+}";
+
+            await RunScriptAsync(parseScript, ct: ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            try { _fileSystemService.DeleteFile(tempFile); }
+            catch { /* best effort cleanup */ }
+        }
+    }
+
+    private void ReportLine(string line, IProgress<TaskProgressDetail>? progress, LogLevel defaultLevel)
+    {
+        if (progress == null || string.IsNullOrWhiteSpace(line)) return;
+
+        var match = PercentRegex.Match(line);
+        if (match.Success && double.TryParse(match.Groups[1].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var pct))
+        {
+            progress.Report(new TaskProgressDetail
+            {
+                Progress = pct,
+                TerminalOutput = line,
+                IsActive = true
+            });
+        }
+        else
+        {
+            progress.Report(new TaskProgressDetail
+            {
+                TerminalOutput = line,
+                IsActive = true,
+                LogLevel = defaultLevel
+            });
+        }
+    }
+}

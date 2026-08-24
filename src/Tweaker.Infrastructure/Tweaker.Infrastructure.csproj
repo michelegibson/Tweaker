@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="Tweaker.Infrastructure.Tests" />
+    </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.7" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tweaker.Core\Tweaker.Core.csproj" />
+    <ProjectReference Include="..\WindowsPackageManager.Interop\WindowsPackageManager.Interop.csproj" />
+  </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="System.Management" Version="8.0.0" />
+        <PackageReference Include="System.Data.SqlClient" Version="4.8.6" />
+        <PackageReference Include="System.DirectoryServices.Protocols" Version="8.0.0" />
+        <PackageReference Include="System.IO.Packaging" Version="8.0.1" />
+        <PackageReference Include="Microsoft.Windows.Compatibility" Version="8.0.10" />
+        <!-- Pin patched System.Security.Cryptography.Xml: floors out the vulnerable
+             transitive (NU1903 / GHSA-37gx-xxp4-5rgx CVE-2026-33116,
+             GHSA-w3x6-4m5h-cxqf CVE-2026-26171). 10.0.6 is the patched floor; 10.0.7 is latest. -->
+        <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.7" />
+    </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Features\SoftwareApps\Services\WinGet\winget-cli\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>winget-cli\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </None>
+  </ItemGroup>
+</Project>

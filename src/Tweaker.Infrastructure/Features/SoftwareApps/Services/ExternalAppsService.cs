@@ -1,0 +1,406 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Tweaker.Core.Features.Common.Constants;
+using Tweaker.Core.Features.Common.Enums;
+using Tweaker.Core.Features.Common.Extensions;
+using Tweaker.Core.Features.Common.Interfaces;
+using Tweaker.Core.Features.Common.Models;
+using Tweaker.Core.Features.SoftwareApps.Interfaces;
+using Tweaker.Core.Features.SoftwareApps.Models;
+
+namespace Tweaker.Infrastructure.Features.SoftwareApps.Services;
+
+public class ExternalAppsService(
+    ILogService logService,
+    IWinGetPackageInstaller winGetPackageInstaller,
+    IWinGetDetectionService winGetDetectionService,
+    IWinGetBootstrapper winGetBootstrapper,
+    IAppStatusDiscoveryService appStatusDiscoveryService,
+    IExternalAppUninstallService externalAppUninstallService,
+    IDirectDownloadService directDownloadService,
+    ITaskProgressService taskProgressService,
+    IChocolateyService chocolateyService,
+    IInteractiveUserService interactiveUserService,
+    IFileSystemService fileSystemService,
+    IProcessExecutor processExecutor,
+    IChangeHistoryService changeHistory) : IExternalAppsService
+{
+    public string DomainName => FeatureIds.ExternalApps;
+
+    public event EventHandler? WinGetReady
+    {
+        add => winGetBootstrapper.WinGetInstalled += value;
+        remove => winGetBootstrapper.WinGetInstalled -= value;
+    }
+
+    public void InvalidateStatusCache() => appStatusDiscoveryService.InvalidateCache();
+
+    public Task<IEnumerable<ItemDefinition>> GetAppsAsync()
+    {
+        return Task.FromResult<IEnumerable<ItemDefinition>>(ExternalAppDefinitions.GetExternalApps().Items);
+    }
+
+    public async Task<OperationResult<bool>> InstallAppAsync(ItemDefinition item, IProgress<TaskProgressDetail>? progress = null)
+    {
+        var cancellationToken = taskProgressService.GetCurrentCancellationToken();
+
+        try
+        {
+            if (item.ExternalApp?.RequiresDirectDownload == true)
+            {
+                logService.LogInformation($"Installing {item.Name} via direct download");
+                var success = await directDownloadService.DownloadAndInstallAsync(item, progress, cancellationToken).ConfigureAwait(false);
+                return success
+                    ? OperationResult<bool>.Succeeded(true)
+                    : OperationResult<bool>.Failed("Direct download installation failed");
+            }
+
+            // Build ordered source list: WinGet → MsStore → Choco
+            var sources = new List<(string packageId, string source)>();
+
+            if (item.WinGetPackageId != null && item.WinGetPackageId.Any())
+                sources.Add((item.WinGetPackageId[0], "winget"));
+            if (!string.IsNullOrEmpty(item.MsStoreId))
+                sources.Add((item.MsStoreId, "msstore"));
+
+            PackageInstallResult? lastResult = null;
+
+            foreach (var (pkgId, src) in sources)
+            {
+                try
+                {
+                    var installerType = await winGetDetectionService.GetInstallerTypeAsync(pkgId, cancellationToken).ConfigureAwait(false);
+                    var isPortable = IsPortableInstallerType(installerType);
+
+                    lastResult = await winGetPackageInstaller.InstallPackageAsync(pkgId, src, item.Name, item.WinGetInstallerOverride, cancellationToken).ConfigureAwait(false);
+
+                    if (lastResult.Success)
+                    {
+                        if (isPortable)
+                            await CreateStartMenuShortcutForPortableAppAsync(item).ConfigureAwait(false);
+
+                        return OperationResult<bool>.Succeeded(true);
+                    }
+
+                    logService.LogWarning($"Install failed for '{item.Name}' via {src}/{pkgId}: {lastResult.FailureReason}");
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logService.LogError($"Exception installing '{item.Name}' via {src}/{pkgId}: {ex.Message}");
+                    lastResult = PackageInstallResult.Failed(InstallFailureReason.Other, ex.Message);
+                }
+            }
+
+            // Chocolatey fallback when ChocoPackageId is defined
+            if (!string.IsNullOrEmpty(item.ChocoPackageId))
+            {
+                logService.LogInformation($"Attempting Chocolatey install for '{item.Name}' with '{item.ChocoPackageId}'");
+
+                try
+                {
+                    var chocoReady = await chocolateyService.IsChocolateyInstalledAsync(cancellationToken).ConfigureAwait(false)
+                        || await chocolateyService.InstallChocolateyAsync(cancellationToken).ConfigureAwait(false);
+
+                    if (chocoReady)
+                    {
+                        var chocoSuccess = await chocolateyService.InstallPackageAsync(item.ChocoPackageId, item.Name, cancellationToken).ConfigureAwait(false);
+                        if (chocoSuccess)
+                        {
+                            if (IsChocoPortablePackage(item.ChocoPackageId))
+                                await CreateStartMenuShortcutForChocoPortableAppAsync(item).ConfigureAwait(false);
+
+                            return OperationResult<bool>.Succeeded(true);
+                        }
+
+                        logService.LogWarning($"Chocolatey install failed for '{item.Name}'");
+                    }
+                    else
+                    {
+                        logService.LogError("Failed to install Chocolatey, cannot proceed with Chocolatey install");
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logService.LogWarning($"Chocolatey install failed for '{item.Name}': {ex.Message}");
+                }
+            }
+
+            // Direct download fallback when WinGet/Store/Chocolatey all failed
+            if (item.ExternalApp?.DownloadUrl != null)
+            {
+                logService.LogInformation($"All package manager installs failed for '{item.Name}', attempting direct download fallback");
+
+                try
+                {
+                    var success = await directDownloadService.DownloadAndInstallAsync(item, progress, cancellationToken).ConfigureAwait(false);
+                    if (success)
+                        return OperationResult<bool>.Succeeded(true);
+
+                    logService.LogWarning($"Direct download fallback failed for '{item.Name}'");
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logService.LogWarning($"Direct download fallback failed for '{item.Name}': {ex.Message}");
+                }
+            }
+
+            return OperationResult<bool>.Failed(lastResult?.ErrorMessage ?? "Installation failed");
+        }
+        catch (OperationCanceledException)
+        {
+            logService.LogInformation($"Installation of {item.Name} was cancelled");
+            return OperationResult<bool>.Cancelled("Operation was cancelled");
+        }
+        catch (Exception ex)
+        {
+            logService.LogError($"Failed to install {item.Name}: {ex.Message}");
+            return OperationResult<bool>.Failed(ex.Message);
+        }
+    }
+
+    private static bool IsPortableInstallerType(string? installerType)
+    {
+        if (string.IsNullOrEmpty(installerType))
+            return false;
+
+        var lower = installerType.ToLowerInvariant();
+        return lower.Contains("portable") || lower == "zip";
+    }
+
+    private async Task CreateStartMenuShortcutForPortableAppAsync(ItemDefinition item)
+    {
+        try
+        {
+            var installDir = FindPortableAppDirectory(item);
+            if (string.IsNullOrEmpty(installDir))
+            {
+                logService.LogWarning($"Could not find installation directory for {item.Name}");
+                return;
+            }
+
+            var exeFiles = fileSystemService.GetFiles(installDir, "*.exe", SearchOption.AllDirectories).ToList();
+            if (!exeFiles.Any())
+            {
+                logService.LogWarning($"No executables found for {item.Name}");
+                return;
+            }
+
+            var startMenuFolder = fileSystemService.CombinePath(
+                interactiveUserService.GetInteractiveUserFolderPath(Environment.SpecialFolder.Programs),
+                item.Name);
+
+            fileSystemService.CreateDirectory(startMenuFolder);
+
+            foreach (var exePath in exeFiles)
+            {
+                var exeName = fileSystemService.GetFileNameWithoutExtension(exePath);
+                var shortcutPath = fileSystemService.CombinePath(startMenuFolder, $"{exeName}.lnk");
+
+                await CreateShortcutAsync(shortcutPath, exePath, fileSystemService.GetDirectoryName(exePath)!, item.Name).ConfigureAwait(false);
+            }
+
+            logService.LogInformation($"Created Start Menu folder with {exeFiles.Count} shortcuts for {item.Name}");
+        }
+        catch (Exception ex)
+        {
+            logService.LogWarning($"Error creating Start Menu shortcuts for {item.Name}: {ex.Message}");
+        }
+    }
+
+    private static bool IsChocoPortablePackage(string chocoPackageId)
+    {
+        return chocoPackageId.EndsWith(".portable", StringComparison.OrdinalIgnoreCase)
+            || chocoPackageId.Contains(".portable.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task CreateStartMenuShortcutForChocoPortableAppAsync(ItemDefinition item)
+    {
+        try
+        {
+            var installDir = FindChocoPackageDirectory(item.ChocoPackageId!);
+            if (string.IsNullOrEmpty(installDir))
+            {
+                logService.LogWarning($"Could not find Chocolatey install directory for {item.Name}");
+                return;
+            }
+
+            var exeFiles = fileSystemService.GetFiles(installDir, "*.exe", SearchOption.AllDirectories)
+                .Where(f => !fileSystemService.GetFileName(f).Equals("ChocolateyInstall.ps1", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (!exeFiles.Any())
+            {
+                logService.LogWarning($"No executables found in Chocolatey package for {item.Name}");
+                return;
+            }
+
+            var startMenuFolder = fileSystemService.CombinePath(
+                interactiveUserService.GetInteractiveUserFolderPath(Environment.SpecialFolder.Programs),
+                item.Name);
+
+            fileSystemService.CreateDirectory(startMenuFolder);
+
+            foreach (var exePath in exeFiles)
+            {
+                var exeName = fileSystemService.GetFileNameWithoutExtension(exePath);
+                var shortcutPath = fileSystemService.CombinePath(startMenuFolder, $"{exeName}.lnk");
+                await CreateShortcutAsync(shortcutPath, exePath, fileSystemService.GetDirectoryName(exePath)!, item.Name).ConfigureAwait(false);
+            }
+
+            logService.LogInformation($"Created Start Menu folder with {exeFiles.Count} shortcuts for {item.Name} (Chocolatey portable)");
+        }
+        catch (Exception ex)
+        {
+            logService.LogWarning($"Error creating Start Menu shortcuts for Chocolatey package {item.Name}: {ex.Message}");
+        }
+    }
+
+    private string? FindChocoPackageDirectory(string chocoPackageId)
+    {
+        var searchPaths = new[]
+        {
+            @"C:\ProgramData\chocolatey\lib",
+            fileSystemService.CombinePath(interactiveUserService.GetInteractiveUserFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "UniGetUI", "Chocolatey", "lib")
+        };
+
+        foreach (var basePath in searchPaths)
+        {
+            if (!fileSystemService.DirectoryExists(basePath))
+                continue;
+
+            var packageDir = fileSystemService.CombinePath(basePath, chocoPackageId, "tools");
+            if (fileSystemService.DirectoryExists(packageDir))
+                return packageDir;
+
+            // Also check without "tools" subfolder
+            packageDir = fileSystemService.CombinePath(basePath, chocoPackageId);
+            if (fileSystemService.DirectoryExists(packageDir))
+                return packageDir;
+        }
+
+        return null;
+    }
+
+    private string? FindPortableAppDirectory(ItemDefinition item)
+    {
+        var searchPaths = new List<string>
+        {
+            fileSystemService.CombinePath(interactiveUserService.GetInteractiveUserFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "WinGet", "Packages"),
+            @"C:\Program Files\WinGet\Packages",
+            @"C:\Program Files (x86)\WinGet\Packages"
+        };
+
+        // Under OTS, also search the process user's (admin) AppData since WinGet runs as admin
+        if (interactiveUserService.IsOtsElevation)
+        {
+            searchPaths.Add(fileSystemService.CombinePath(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "WinGet", "Packages"));
+        }
+
+        foreach (var basePath in searchPaths)
+        {
+            if (!fileSystemService.DirectoryExists(basePath))
+                continue;
+
+            var matchingDir = item.WinGetPackageId!
+                .SelectMany(pkgId => fileSystemService.GetDirectories(basePath, $"{pkgId}*"))
+                .Distinct()
+                .FirstOrDefault();
+
+            if (matchingDir != null)
+                return matchingDir;
+        }
+
+        return null;
+    }
+
+    private async Task CreateShortcutAsync(string shortcutPath, string targetPath, string workingDir, string description)
+    {
+        var script = $@"
+$WshShell = New-Object -ComObject WScript.Shell
+$Shortcut = $WshShell.CreateShortcut('{shortcutPath.Replace("'", "''")}')
+$Shortcut.TargetPath = '{targetPath.Replace("'", "''")}'
+$Shortcut.WorkingDirectory = '{workingDir?.Replace("'", "''")}'
+$Shortcut.Description = '{description.Replace("'", "''")}'
+$Shortcut.Save()
+";
+
+        var args = $"-NoProfile -ExecutionPolicy Bypass -Command \"{script.Replace("\"", "\\\"")}\"";
+        var result = await processExecutor.ExecuteAsync("powershell", args, CancellationToken.None).ConfigureAwait(false);
+
+        if (result.ExitCode != 0)
+        {
+            logService.LogWarning($"Failed to create shortcut at {shortcutPath}: {result.StandardError}");
+        }
+    }
+
+    public async Task<OperationResult<bool>> UninstallAppAsync(ItemDefinition item, IProgress<TaskProgressDetail>? progress = null)
+    {
+        try
+        {
+            var cancellationToken = taskProgressService.GetCurrentCancellationToken();
+            var result = await externalAppUninstallService.UninstallAsync(item, progress, cancellationToken).ConfigureAwait(false);
+
+            if (result.Success)
+            {
+                changeHistory.LogAppChange(item.Name, AppChangeKind.Removed);
+                RemoveStartMenuShortcutIfExists(item.Name);
+            }
+
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            logService.LogInformation($"Uninstall of {item.Name} was cancelled by user");
+            return OperationResult<bool>.Cancelled("Uninstall cancelled by user");
+        }
+        catch (Exception ex)
+        {
+            logService.LogError($"Failed to uninstall {item.Name}: {ex.Message}");
+            return OperationResult<bool>.Failed(ex.Message);
+        }
+    }
+
+    private void RemoveStartMenuShortcutIfExists(string appName)
+    {
+        try
+        {
+            var startMenuFolder = fileSystemService.CombinePath(
+                interactiveUserService.GetInteractiveUserFolderPath(Environment.SpecialFolder.Programs),
+                appName);
+
+            if (fileSystemService.DirectoryExists(startMenuFolder))
+            {
+                fileSystemService.DeleteDirectory(startMenuFolder, true);
+                logService.LogInformation($"Removed Start Menu folder for {appName}");
+            }
+        }
+        catch (Exception ex)
+        {
+            logService.LogWarning($"Could not remove Start Menu folder for {appName}: {ex.Message}");
+        }
+    }
+
+    public async Task<Dictionary<string, bool>> CheckBatchInstalledAsync(IEnumerable<ItemDefinition> definitions)
+    {
+        return await appStatusDiscoveryService.GetExternalAppsInstallationStatusAsync(definitions).ConfigureAwait(false);
+    }
+}

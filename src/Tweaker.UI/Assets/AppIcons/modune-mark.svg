@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Modune">
+  <defs>
+    <linearGradient id="modune-gradient" x1="8" y1="7" x2="58" y2="59" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6757F5"/>
+      <stop offset="0.52" stop-color="#4D72F7"/>
+      <stop offset="1" stop-color="#21B8A8"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="18" fill="url(#modune-gradient)"/>
+  <path d="M12 46V18h9l11 13 11-13h9v28H42V32L32 44 22 32v14H12Z" fill="#FFFFFF"/>
+  <rect x="27.5" y="29.5" width="9" height="9" rx="2.2" transform="rotate(45 32 34)" fill="#172033" fill-opacity=".88"/>
+</svg>

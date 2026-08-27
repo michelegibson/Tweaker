@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:converters="using:Tweaker.UI.Features.Common.Converters">
+
+    <!--
+    Converters.xaml
+    Registers all value converters for use throughout the application.
+    Use these converters with {StaticResource ConverterName} in XAML.
+    -->
+
+    <!-- Boolean Converters -->
+    <converters:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+    <converters:InverseBooleanToVisibilityConverter x:Key="InverseBooleanToVisibilityConverter"/>
+    <converters:InverseBooleanConverter x:Key="InverseBooleanConverter"/>
+
+    <!-- Null/Empty Converters -->
+    <converters:NullToVisibilityConverter x:Key="NullToVisibilityConverter"/>
+    <converters:NotNullToVisibilityConverter x:Key="NotNullToVisibilityConverter"/>
+
+    <!-- Icon Converters -->
+    <converters:IconConverter x:Key="IconConverter"/>
+    <converters:StringToGeometryConverter x:Key="StringToGeometryConverter"/>
+
+    <!-- Badge Converters -->
+    <converters:BadgeKindToStyleConverter x:Key="BadgeKindToStyleConverter"/>
+    <converters:BadgeKindToForegroundConverter x:Key="BadgeKindToForegroundConverter"/>
+
+</ResourceDictionary>

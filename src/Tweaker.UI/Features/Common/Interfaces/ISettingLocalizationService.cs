@@ -1,0 +1,19 @@
+using Tweaker.Core.Features.Common.Models;
+
+namespace Tweaker.UI.Features.Common.Interfaces;
+
+/// <summary>
+/// Service for localizing setting definitions.
+/// </summary>
+public interface ISettingLocalizationService
+{
+    /// <summary>
+    /// Localizes a setting definition's properties.
+    /// </summary>
+    SettingDefinition LocalizeSetting(SettingDefinition setting);
+
+    /// <summary>
+    /// Builds a localized message showing cross-group child settings grouped by feature and group.
+    /// </summary>
+    string? BuildCrossGroupInfoMessage(SettingDefinition setting);
+}

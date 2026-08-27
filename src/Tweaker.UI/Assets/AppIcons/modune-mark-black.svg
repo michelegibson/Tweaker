@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Modune">
+  <path d="M7 52V12h13l12 15 12-15h13v40H43V32L32 46 21 32v20H7Z" fill="#172033"/>
+  <rect x="26.5" y="26.5" width="11" height="11" rx="2.5" transform="rotate(45 32 32)" fill="#172033" fill-opacity=".45"/>
+</svg>

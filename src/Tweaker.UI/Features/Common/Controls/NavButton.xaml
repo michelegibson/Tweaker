@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Tweaker.UI.Features.Common.Controls.NavButton"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Tweaker.UI.Features.Common.Controls"
+    xmlns:fluentIcons="using:FluentIcons.WinUI"
+    IsTabStop="True"
+    UseSystemFocusVisuals="True"
+    AutomationProperties.Name="{x:Bind Text, Mode=OneWay}">
+
+    <Grid x:Name="RootGrid"
+          Width="{x:Bind ActualButtonWidth, Mode=OneWay}"
+          Height="{x:Bind ActualButtonHeight, Mode=OneWay}"
+          PointerEntered="RootGrid_PointerEntered"
+          PointerExited="RootGrid_PointerExited"
+          PointerPressed="RootGrid_PointerPressed"
+          PointerReleased="RootGrid_PointerReleased">
+
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="InteractionStates">
+                <VisualState x:Name="Rest">
+                    <VisualState.Setters>
+                        <Setter Target="BackgroundBorder.Background" Value="Transparent"/>
+                        <Setter Target="BackgroundBorder.BorderBrush" Value="Transparent"/>
+                        <Setter Target="ButtonFluentIcon.Foreground" Value="{ThemeResource BrandTextSecondaryBrush}"/>
+                        <Setter Target="ButtonText.Foreground" Value="{ThemeResource BrandTextSecondaryBrush}"/>
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Hover">
+                    <VisualState.Setters>
+                        <Setter Target="BackgroundBorder.Background" Value="{ThemeResource BrandCardHoverBrush}"/>
+                        <Setter Target="BackgroundBorder.BorderBrush" Value="{ThemeResource BrandStrokeBrush}"/>
+                        <Setter Target="ButtonFluentIcon.Foreground" Value="{ThemeResource BrandTextPrimaryBrush}"/>
+                        <Setter Target="ButtonText.Foreground" Value="{ThemeResource BrandTextPrimaryBrush}"/>
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Chosen">
+                    <VisualState.Setters>
+                        <Setter Target="BackgroundBorder.Background" Value="{ThemeResource BrandAccentSubtleBrush}"/>
+                        <Setter Target="BackgroundBorder.BorderBrush" Value="{ThemeResource BrandStrokeBrush}"/>
+                        <Setter Target="ButtonFluentIcon.Foreground" Value="{ThemeResource BrandAccentBrush}"/>
+                        <Setter Target="ButtonText.Foreground" Value="{ThemeResource BrandTextPrimaryBrush}"/>
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
+        <!-- Main Button Background -->
+        <Border x:Name="BackgroundBorder"
+                Background="Transparent"
+                BorderBrush="Transparent"
+                BorderThickness="1"
+                CornerRadius="11"/>
+
+        <!-- Horizontal icon-and-label content; compact mode keeps only the icon. -->
+        <Grid Margin="14,0"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Center"
+              ColumnDefinitions="Auto,*"
+              ColumnSpacing="12"
+              Opacity="{x:Bind ContentOpacity, Mode=OneWay}">
+            <!-- Colored Fluent System Icon (IconVariant=Color). The Icon name is set
+                 in code-behind from IconSymbol because Icon is an enum, not a string. -->
+            <fluentIcons:FluentIcon x:Name="ButtonFluentIcon"
+                                    Grid.Column="0"
+                                    IconVariant="Regular"
+                                    FontSize="{x:Bind IconSize, Mode=OneWay}"
+                                    Foreground="{ThemeResource BrandTextSecondaryBrush}"
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Center"
+                                    Margin="{x:Bind IconMargin, Mode=OneWay}"
+                                    Visibility="{x:Bind FluentIconVisibility, Mode=OneWay}"/>
+
+            <!-- Text is hidden in compact mode; the parent keeps the full
+                 accessible name even when the visible label is trimmed. -->
+            <TextBlock x:Name="ButtonText"
+                       Grid.Column="1"
+                       Text="{x:Bind Text, Mode=OneWay}"
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Foreground="{ThemeResource BrandTextSecondaryBrush}"
+                       TextWrapping="NoWrap"
+                       TextTrimming="CharacterEllipsis"
+                       MaxLines="1"
+                       TextAlignment="Left"
+                       HorizontalAlignment="Stretch"
+                       VerticalAlignment="Center"
+                       Visibility="{x:Bind TextVisibility, Mode=OneWay}"/>
+        </Grid>
+
+        <!-- Left Selection Indicator -->
+        <Border x:Name="SelectionIndicator"
+                Width="4"
+                Height="24"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Center"
+                CornerRadius="0,3,3,0"
+                Background="{ThemeResource BrandAccentBrush}"
+                Visibility="{x:Bind IndicatorVisibility, Mode=OneWay}"/>
+
+        <!-- InfoBadge Overlay -->
+        <InfoBadge x:Name="Badge"
+                   HorizontalAlignment="Right"
+                   VerticalAlignment="Top"
+                   Margin="0,2,2,0"
+                   Visibility="{x:Bind BadgeVisibility, Mode=OneWay}"
+                   Value="{x:Bind BadgeValue, Mode=OneWay}"/>
+
+        <!-- Loading Overlay -->
+        <Border x:Name="LoadingOverlay"
+                Background="#80000000"
+                CornerRadius="11"
+                Visibility="{x:Bind LoadingVisibility, Mode=OneWay}">
+            <ProgressRing IsActive="{x:Bind IsLoading, Mode=OneWay}"
+                          Width="24"
+                          Height="24"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"/>
+        </Border>
+
+        <!-- Locked Overlay -->
+        <Grid Visibility="{x:Bind LockedVisibility, Mode=OneWay}"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center">
+            <Viewbox Width="14" Height="14">
+                <PathIcon Data="{StaticResource PrivacyIconPath}"
+                          Foreground="{ThemeResource BrandWarningBrush}"/>
+            </Viewbox>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -1,0 +1,231 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Tweaker.Core.Features.Common.Extensions;
+using Tweaker.Core.Features.Common.Interfaces;
+using Tweaker.Core.Features.Common.Models;
+using Tweaker.Core.Features.Common.Services;
+using Tweaker.UI.Features.Common.Controls;
+using Tweaker.UI.Features.SoftwareApps;
+using Tweaker.UI.ViewModels;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Tweaker.UI.Helpers;
+
+/// <summary>
+/// Manages the startup loading overlay and initial navigation sequence.
+/// Extracted from MainWindow to reduce code-behind complexity.
+/// </summary>
+internal sealed class StartupUiCoordinator
+{
+    private readonly DispatcherQueue _dispatcherQueue;
+    private readonly ILogService? _logService;
+
+    /// <summary>
+    /// Whether this is the first launch of the application.
+    /// </summary>
+    public bool IsFirstLaunch { get; private set; }
+
+    public StartupUiCoordinator(DispatcherQueue dispatcherQueue, ILogService? logService)
+    {
+        _dispatcherQueue = dispatcherQueue;
+        _logService = logService;
+    }
+
+    /// <summary>
+    /// Sets all overlay text from localization keys and updates the loading logo.
+    /// </summary>
+    public void InitializeLoadingOverlay(
+        TextBlock loadingTitleText,
+        TextBlock loadingTaglineText,
+        TextBlock loadingStatusText,
+        Image loadingLogo,
+        Grid rootGrid)
+    {
+        UpdateLoadingLogo(loadingLogo, rootGrid);
+
+        try
+        {
+            var localizationService = App.Services.GetService<ILocalizationService>();
+            if (localizationService != null)
+            {
+                loadingTitleText.Text = localizationService.GetString("App_Title");
+                loadingTaglineText.Text = localizationService.GetString("App_Tagline");
+                loadingStatusText.Text = localizationService.GetString("Loading_PreparingApp");
+            }
+        }
+        catch (Exception ex)
+        {
+            App.Services.GetService<ILogService>()?.LogDebug($"Failed to set loading overlay text: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Sets the loading overlay logo based on the current theme.
+    /// </summary>
+    public void UpdateLoadingLogo(Image loadingLogo, Grid rootGrid)
+    {
+        try
+        {
+            var logoUri = "ms-appx:///Assets/AppIcons/modune-mark.png";
+            var bitmapImage = new BitmapImage();
+            bitmapImage.DecodePixelWidth = 256;
+            bitmapImage.DecodePixelHeight = 256;
+            bitmapImage.DecodePixelType = DecodePixelType.Logical;
+            bitmapImage.UriSource = new Uri(logoUri);
+            loadingLogo.Source = bitmapImage;
+        }
+        catch (Exception ex)
+        {
+            _logService?.LogDebug($"Failed to set loading logo: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Delegates startup to the orchestrator, then dispatches completion on the UI thread.
+    /// </summary>
+    public async Task RunStartupAndCompleteAsync(
+        TextBlock loadingStatusText,
+        Frame contentFrame,
+        NavSidebar navSidebar,
+        Grid loadingOverlay,
+        Func<MainWindowViewModel?> getViewModel,
+        Action markStartupComplete)
+    {
+        try
+        {
+            var orchestrator = App.Services.GetRequiredService<IStartupOrchestrator>();
+
+            var statusProgress = new Progress<string>(localizationKey =>
+            {
+                _dispatcherQueue.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        var localizationService = App.Services.GetService<ILocalizationService>();
+                        loadingStatusText.Text = localizationService?.GetString(localizationKey) ?? localizationKey;
+                    }
+                    catch
+                    {
+                        loadingStatusText.Text = localizationKey;
+                    }
+                });
+            });
+
+            var detailedProgress = new Progress<TaskProgressDetail>(detail =>
+            {
+                if (!string.IsNullOrEmpty(detail.StatusText))
+                {
+                    _dispatcherQueue.TryEnqueue(() =>
+                    {
+                        try { loadingStatusText.Text = detail.StatusText; }
+                        catch (Exception ex)
+                        {
+                            App.Services.GetService<ILogService>()?.LogDebug(
+                                $"Failed to update loading status text: {ex.Message}");
+                        }
+                    });
+                }
+            });
+
+            var result = await orchestrator.RunStartupSequenceAsync(statusProgress, detailedProgress)
+                .ConfigureAwait(false);
+            IsFirstLaunch = result.IsFirstLaunch;
+        }
+        catch (Exception ex)
+        {
+            StartupLogger.Log("StartupUiCoordinator", $"RunStartupAndCompleteAsync EXCEPTION: {ex}");
+        }
+
+        // Always complete startup on the UI thread so the app is usable.
+        // A bare DispatcherQueue.TryEnqueue callback runs on the UI thread but
+        // installs no SynchronizationContext — so every `await` of background
+        // work inside CompleteStartupAsync (SoftwareApps load, icon resolution)
+        // would resume on a thread-pool thread and mutate bound UI off-thread,
+        // leaving the Windows/External Apps lists stuck on "Loaded N items"
+        // with stale install status. Install the dispatcher SynchronizationContext
+        // so continuations marshal back to the UI thread for the whole chain.
+        _dispatcherQueue.TryEnqueue(() =>
+        {
+            if (SynchronizationContext.Current is null)
+            {
+                SynchronizationContext.SetSynchronizationContext(
+                    new DispatcherQueueSynchronizationContext(_dispatcherQueue));
+            }
+
+            _ = CompleteStartupAsync(contentFrame, navSidebar, loadingOverlay, getViewModel, markStartupComplete);
+        });
+    }
+
+    /// <summary>
+    /// Navigates to SoftwareApps, waits for initialization, then hides the loading overlay.
+    /// </summary>
+    private async Task CompleteStartupAsync(
+        Frame contentFrame,
+        NavSidebar navSidebar,
+        Grid loadingOverlay,
+        Func<MainWindowViewModel?> getViewModel,
+        Action markStartupComplete)
+    {
+        StartupLogger.Log("StartupUiCoordinator", "CompleteStartupAsync starting");
+
+        try
+        {
+            // Navigate to SoftwareApps with "startup" parameter to prevent double-init
+            navSidebar.SelectedTag = "SoftwareApps";
+            contentFrame.Navigate(typeof(SoftwareAppsPage), "startup");
+
+            // Block startup on Windows Apps only — those icons resolve fast (mostly
+            // local AppX). External Apps icon resolution hits Wikimedia, which can
+            // take tens of seconds on a cold burst; we kick that off in the
+            // background so the main window appears promptly. The External Apps
+            // tab has its own loading overlay (bound to ExternalAppsViewModel.IsLoading)
+            // that covers the user-clicks-tab-before-ready case.
+            var page = contentFrame.Content as SoftwareAppsPage;
+            if (page != null)
+            {
+                StartupLogger.Log("StartupUiCoordinator", "Awaiting Windows Apps initialization...");
+                await page.ViewModel.InitializeWindowsAppsAsync();
+                StartupLogger.Log("StartupUiCoordinator", "Windows Apps initialization complete");
+
+                StartupLogger.Log("StartupUiCoordinator", "Kicking off External Apps initialization in background");
+                page.ViewModel.InitializeExternalAppsAsync().FireAndForget(_logService!);
+            }
+        }
+        catch (Exception ex)
+        {
+            StartupLogger.Log("StartupUiCoordinator", $"SoftwareApps initialization failed: {ex.Message}");
+            _logService?.LogWarning($"SoftwareApps init failed: {ex.Message}");
+        }
+
+        // Hide overlay and mark startup complete
+        markStartupComplete();
+        loadingOverlay.Visibility = Visibility.Collapsed;
+        StartupLogger.Log("StartupUiCoordinator", "Startup complete, overlay hidden");
+
+        // Show first-launch restore point offer if this is the first launch
+        try
+        {
+            if (IsFirstLaunch)
+            {
+                var startupNotifications = App.Services.GetRequiredService<IStartupNotificationService>();
+                await startupNotifications.ShowFirstLaunchRestoreOfferAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            StartupLogger.Log("StartupUiCoordinator", $"Startup notification failed: {ex.Message}");
+        }
+
+        // Check for updates silently (only shows InfoBar if update available)
+        var viewModel = getViewModel();
+        if (viewModel != null)
+        {
+            _ = viewModel.UpdateCheck.CheckForUpdatesOnStartupAsync();
+        }
+    }
+}

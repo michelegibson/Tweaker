@@ -1,0 +1,562 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Tweaker.UI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Tweaker.UI"
+    xmlns:controls="using:Tweaker.UI.Features.Common.Controls"
+    xmlns:fluentIcons="using:FluentIcons.WinUI"
+    Title="Modune">
+
+    <Grid x:Name="RootGrid"
+          Loaded="RootGrid_Loaded"
+          Background="Transparent"
+          KeyboardAcceleratorPlacementMode="Hidden">
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="TitleBarLayoutStates">
+                <VisualState x:Name="CompactTitleBar">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="0"/>
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="AppSubtitleTextBlock.Visibility" Value="Collapsed"/>
+                        <Setter Target="NormalModeLabelText.Visibility" Value="Collapsed"/>
+                        <Setter Target="BuilderModeLabelText.Visibility" Value="Collapsed"/>
+                        <Setter Target="ReviewModeLabelText.Visibility" Value="Collapsed"/>
+                        <Setter Target="BugReportButton.Visibility" Value="Collapsed"/>
+                        <Setter Target="DocsButton.Visibility" Value="Collapsed"/>
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="WideTitleBar">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="1180"/>
+                    </VisualState.StateTriggers>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+        <Grid.KeyboardAccelerators>
+            <!-- Ctrl+1-5: Navigate to sections, Ctrl+6: More menu -->
+            <KeyboardAccelerator Key="Number1" Modifiers="Control" Invoked="NavigateAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number2" Modifiers="Control" Invoked="NavigateAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number3" Modifiers="Control" Invoked="NavigateAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number4" Modifiers="Control" Invoked="NavigateAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number5" Modifiers="Control" Invoked="NavigateAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number6" Modifiers="Control" Invoked="MoreMenuAccelerator_Invoked"/>
+            <!-- Ctrl +/-/0: UI zoom (numpad keys; main-row +/- added in code-behind) -->
+            <KeyboardAccelerator Key="Add" Modifiers="Control" Invoked="ZoomInAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Subtract" Modifiers="Control" Invoked="ZoomOutAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number0" Modifiers="Control" Invoked="ZoomResetAccelerator_Invoked"/>
+            <!-- Ctrl+Shift+1-3: Title bar action buttons (Filter, Bug, Docs) -->
+            <KeyboardAccelerator Key="Number1" Modifiers="Control,Shift" Invoked="TitleBarAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number2" Modifiers="Control,Shift" Invoked="TitleBarAccelerator_Invoked"/>
+            <KeyboardAccelerator Key="Number3" Modifiers="Control,Shift" Invoked="TitleBarAccelerator_Invoked"/>
+        </Grid.KeyboardAccelerators>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="64"/>    <!-- TitleBar -->
+            <RowDefinition Height="Auto"/>  <!-- Mode Bar (Builder / Config Review) — directly under the title -->
+            <RowDefinition Height="Auto"/>  <!-- OTS Elevation InfoBar -->
+            <RowDefinition Height="Auto"/>  <!-- Update InfoBar -->
+            <RowDefinition Height="*"/>     <!-- Main Content -->
+        </Grid.RowDefinitions>
+
+        <!-- Title Bar Area -->
+        <Grid x:Name="AppTitleBar"
+              Height="64"
+              Grid.Row="0"
+              Background="{ThemeResource BrandSidebarBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="LeftPaddingColumn" Width="0"/>
+                <ColumnDefinition x:Name="ToggleColumn" Width="Auto"/>
+                <ColumnDefinition x:Name="IconColumn" Width="Auto"/>
+                <ColumnDefinition x:Name="TitleColumn" Width="Auto"/>
+                <ColumnDefinition x:Name="DragColumn" Width="*"/>
+                <ColumnDefinition x:Name="ButtonsColumn" Width="Auto"/>
+                <ColumnDefinition x:Name="RightPaddingColumn" Width="0"/>
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.ColumnSpan="7"
+                    Height="1"
+                    VerticalAlignment="Bottom"
+                    Background="{ThemeResource BrandStrokeBrush}"
+                    IsHitTestVisible="False"/>
+
+            <!-- Navigation Toggle Button (Hamburger) -->
+            <Button x:Name="PaneToggleButton"
+                    Grid.Column="1"
+                    Click="PaneToggleButton_Click"
+                    Style="{StaticResource TitleBarButtonStyle}"
+                    ToolTipService.ToolTip="{x:Bind ViewModel.ToggleNavigationTooltip, Mode=OneWay}"
+                    AutomationProperties.Name="{x:Bind ViewModel.ToggleNavigationTooltip, Mode=OneWay}"
+                    Margin="10,0,2,0">
+                <fluentIcons:FluentIcon Icon="Navigation" IconVariant="Regular" FontSize="18"/>
+            </Button>
+
+            <!-- App Icon -->
+            <Image x:Name="AppIcon"
+                   Grid.Column="2"
+                   Width="30" Height="30"
+                   Margin="8,0,10,0"
+                   VerticalAlignment="Center"/>
+
+            <!-- App Title and Subtitle -->
+            <StackPanel Grid.Column="3"
+                        VerticalAlignment="Center"
+                        Spacing="-2">
+                <TextBlock x:Name="AppTitleTextBlock"
+                           Text="{x:Bind ViewModel.AppTitle, Mode=OneWay}"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           CharacterSpacing="8"
+                           VerticalAlignment="Center"/>
+                <TextBlock x:Name="AppSubtitleTextBlock"
+                           Text="{x:Bind ViewModel.AppSubtitle, Mode=OneWay}"
+                           FontSize="10"
+                           Foreground="{ThemeResource BrandTextTertiaryBrush}"
+                           CharacterSpacing="35"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+
+            <!-- Beta Banner (hidden in stable builds, shown dynamically for beta) -->
+            <!-- Moved to the left of the centered Mode switcher per design. -->
+            <TextBlock x:Name="BetaBannerText"
+                       Grid.Column="4"
+                       Text="BETA"
+                       Foreground="{ThemeResource BrandDangerBrush}"
+                       FontSize="12"
+                       FontWeight="SemiBold"
+                       HorizontalAlignment="Left"
+                       VerticalAlignment="Center"
+                       Margin="12,0,0,0"
+                       IsHitTestVisible="False"
+                       Visibility="Collapsed"/>
+
+            <!-- Tweaker Mode switcher (centered in the title bar) — single segmented
+                 container like the Software Apps view-mode toggle: a bordered pill with
+                 the selected segment highlighted. Interactive, so the whole ModeSwitcher
+                 is registered as a title-bar passthrough region in code-behind.
+                 NOTE: icon names reuse the confirmed-valid set; refine in the designer. -->
+            <StackPanel x:Name="ModeSwitcher"
+                        Grid.Column="4"
+                        Orientation="Horizontal"
+                        Spacing="0"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center">
+                <TextBlock Text="{x:Bind ViewModel.TweakerModeLabel, Mode=OneWay}"
+                           FontSize="10"
+                           FontWeight="SemiBold"
+                           Foreground="{ThemeResource BrandTextTertiaryBrush}"
+                           CharacterSpacing="35"
+                           VerticalAlignment="Center"
+                           Visibility="Collapsed"/>
+                <Border CornerRadius="12"
+                        Background="{ThemeResource BrandPanelAltBrush}"
+                        BorderBrush="{ThemeResource BrandStrokeBrush}"
+                        BorderThickness="1"
+                        Padding="2">
+                    <StackPanel Orientation="Horizontal" Spacing="2">
+                        <ToggleButton x:Name="NormalModeButton"
+                                      Tag="Normal"
+                                      Click="ModeButton_Click"
+                                      IsChecked="{x:Bind ViewModel.IsNormalMode, Mode=OneWay}"
+                                      ToolTipService.ToolTip="{x:Bind ViewModel.ModeNormalTooltip, Mode=OneWay}"
+                                      AutomationProperties.Name="{x:Bind ViewModel.ModeNormalTooltip, Mode=OneWay}"
+                                      BorderThickness="0"
+                                      CornerRadius="9"
+                                      Padding="11,7">
+                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                <fluentIcons:FluentIcon Icon="Gauge"
+                                                        IconVariant="Regular"
+                                                        FontSize="16"
+                                                        VerticalAlignment="Center"/>
+                                <TextBlock x:Name="NormalModeLabelText"
+                                           Text="{x:Bind ViewModel.ModeNormalLabel, Mode=OneWay}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </ToggleButton>
+                        <ToggleButton x:Name="BuilderModeButton"
+                                      Tag="Builder"
+                                      Click="ModeButton_Click"
+                                      IsChecked="{x:Bind ViewModel.IsBuilderModeActive, Mode=OneWay}"
+                                      ToolTipService.ToolTip="{x:Bind ViewModel.ModeBuilderTooltip, Mode=OneWay}"
+                                      AutomationProperties.Name="{x:Bind ViewModel.ModeBuilderTooltip, Mode=OneWay}"
+                                      BorderThickness="0"
+                                      CornerRadius="9"
+                                      Padding="11,7">
+                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                <fluentIcons:FluentIcon Icon="DocumentSave"
+                                                        IconVariant="Regular"
+                                                        FontSize="16"
+                                                        VerticalAlignment="Center"/>
+                                <TextBlock x:Name="BuilderModeLabelText"
+                                           Text="{x:Bind ViewModel.ModeBuilderLabel, Mode=OneWay}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </ToggleButton>
+                        <ToggleButton x:Name="ConfigReviewModeButton"
+                                      Tag="ConfigReview"
+                                      Click="ModeButton_Click"
+                                      IsChecked="{x:Bind ViewModel.IsConfigReviewModeActive, Mode=OneWay}"
+                                      ToolTipService.ToolTip="{x:Bind ViewModel.ModeConfigReviewTooltip, Mode=OneWay}"
+                                      AutomationProperties.Name="{x:Bind ViewModel.ModeConfigReviewTooltip, Mode=OneWay}"
+                                      BorderThickness="0"
+                                      CornerRadius="9"
+                                      Padding="11,7">
+                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                <fluentIcons:FluentIcon Icon="ApprovalsApp"
+                                                        IconVariant="Regular"
+                                                        FontSize="16"
+                                                        VerticalAlignment="Center"/>
+                                <TextBlock x:Name="ReviewModeLabelText"
+                                           Text="{x:Bind ViewModel.ModeConfigReviewLabel, Mode=OneWay}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </ToggleButton>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- Title Bar Action Buttons -->
+            <StackPanel x:Name="TitleBarButtons"
+                        Grid.Column="5"
+                        Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Margin="0,0,12,0"
+                        Spacing="4">
+
+                <!-- Save/Import Config buttons removed — consolidated into the Mode switcher
+                     (Builder = Save, Config Review = Import). -->
+
+                <!-- Windows Version Filter Button -->
+                <Button x:Name="WindowsFilterButton"
+                        Style="{StaticResource TitleBarButtonStyle}"
+                        ToolTipService.ToolTip="{x:Bind ViewModel.WindowsFilterTooltip, Mode=OneWay}"
+                        AutomationProperties.Name="{x:Bind ViewModel.WindowsFilterTooltip, Mode=OneWay}"
+                        IsEnabled="{x:Bind ViewModel.IsWindowsFilterButtonEnabled, Mode=OneWay}">
+                    <Viewbox Width="18" Height="18">
+                        <PathIcon x:Name="WindowsFilterIcon" Data="{StaticResource FilterCheckIconPath}" Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
+                    </Viewbox>
+                </Button>
+
+                <!-- Bug Report Button -->
+                <Button x:Name="BugReportButton"
+                        Style="{StaticResource TitleBarButtonStyle}"
+                        ToolTipService.ToolTip="{x:Bind ViewModel.BugReportTooltip, Mode=OneWay}"
+                        AutomationProperties.Name="{x:Bind ViewModel.BugReportTooltip, Mode=OneWay}">
+                    <fluentIcons:FluentIcon Icon="Bug" IconVariant="Regular" FontSize="19"/>
+                </Button>
+
+                <!-- Documentation Button -->
+                <Button x:Name="DocsButton"
+                        Style="{StaticResource TitleBarButtonStyle}"
+                        ToolTipService.ToolTip="{x:Bind ViewModel.DocsTooltip, Mode=OneWay}"
+                        AutomationProperties.Name="{x:Bind ViewModel.DocsTooltip, Mode=OneWay}">
+                    <fluentIcons:FluentIcon Icon="BookQuestionMark" IconVariant="Regular" FontSize="19"/>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- OTS Elevation InfoBar -->
+        <InfoBar x:Name="OtsElevationInfoBar"
+                 Grid.Row="2"
+                 Severity="Warning"
+                 IsOpen="{x:Bind ViewModel.IsOtsInfoBarOpen, Mode=OneWay}"
+                 Title="{x:Bind ViewModel.OtsInfoBarTitle, Mode=OneWay}"
+                 Message="{x:Bind ViewModel.OtsInfoBarMessage, Mode=OneWay}"
+                 IsClosable="True"
+                 Closed="OtsElevationInfoBar_Closed"/>
+
+        <!-- Update InfoBar -->
+        <InfoBar x:Name="UpdateInfoBar"
+                 Grid.Row="3"
+                 IsOpen="{x:Bind ViewModel.UpdateCheck.IsUpdateInfoBarOpen, Mode=OneWay}"
+                 Title="{x:Bind ViewModel.UpdateCheck.UpdateInfoBarTitle, Mode=OneWay}"
+                 Message="{x:Bind ViewModel.UpdateCheck.UpdateInfoBarMessage, Mode=OneWay}"
+                 Severity="{x:Bind ViewModel.UpdateCheck.UpdateInfoBarSeverity, Mode=OneWay}"
+                 IsClosable="True"
+                 Closed="UpdateInfoBar_Closed"/>
+
+        <!-- Review Mode Bar (visible during config review) -->
+        <Grid x:Name="ReviewModeBar"
+              Grid.Row="1"
+              Background="{ThemeResource AccentFillColorDefaultBrush}"
+              Visibility="Collapsed"
+              Padding="16,10,16,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>  <!-- Icon -->
+                <ColumnDefinition Width="Auto"/>  <!-- Title -->
+                <ColumnDefinition Width="*"/>     <!-- Description (flex: expands to available width, wraps only when needed) -->
+                <ColumnDefinition Width="Auto"/>  <!-- Status text -->
+                <ColumnDefinition Width="Auto"/>  <!-- Apply button -->
+                <ColumnDefinition Width="Auto"/>  <!-- Cancel button -->
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0"
+                    Width="30" Height="30"
+                    Margin="0,0,10,0"
+                    CornerRadius="9"
+                    Background="#30FFFFFF">
+                <fluentIcons:FluentIcon Icon="ApprovalsApp"
+                                        IconVariant="Regular"
+                                        FontSize="17"
+                                        Foreground="{ThemeResource BrandAccentBarTextBrush}"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"/>
+            </Border>
+
+            <TextBlock Grid.Column="1"
+                       x:Name="ReviewModeTitleText"
+                       Text="{x:Bind ViewModel.ReviewModeBar.ReviewModeTitleText, Mode=OneWay}"
+                       FontWeight="SemiBold"
+                       FontSize="13"
+                       Foreground="{ThemeResource BrandAccentBarTextBrush}"
+                       VerticalAlignment="Center"
+                       Margin="0,0,12,0"/>
+
+            <TextBlock Grid.Column="2"
+                       x:Name="ReviewModeDescriptionText"
+                       Text="{x:Bind ViewModel.ReviewModeBar.ReviewModeDescriptionText, Mode=OneWay}"
+                       FontSize="12"
+                       Foreground="{ThemeResource BrandAccentBarSecondaryTextBrush}"
+                       VerticalAlignment="Center"
+                       TextWrapping="Wrap"
+                       Margin="0,0,16,0"/>
+
+            <TextBlock Grid.Column="3"
+                       x:Name="ReviewModeStatusText"
+                       Text="{x:Bind ViewModel.ReviewModeBar.ReviewModeStatusText, Mode=OneWay}"
+                       FontSize="12"
+                       Foreground="{ThemeResource BrandAccentBarSecondaryTextBrush}"
+                       VerticalAlignment="Center"/>
+
+            <Button Grid.Column="4"
+                    x:Name="ReviewModeApplyButton"
+                    Click="ReviewModeApplyButton_Click"
+                    IsEnabled="{x:Bind ViewModel.ReviewModeBar.CanApplyReviewedConfig, Mode=OneWay}"
+                    AutomationProperties.Name="{x:Bind ViewModel.ReviewModeBar.ReviewModeApplyButtonText, Mode=OneWay}"
+                    Background="{ThemeResource BrandAccentBarActionBackgroundBrush}"
+                    Foreground="{ThemeResource BrandAccentBarActionTextBrush}"
+                    BorderThickness="0"
+                    VerticalAlignment="Center"
+                    Margin="8,0,4,0">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <fluentIcons:FluentIcon Icon="Checkmark" IconVariant="Regular" FontSize="14"/>
+                    <TextBlock x:Name="ReviewModeApplyButtonText"
+                               Text="{x:Bind ViewModel.ReviewModeBar.ReviewModeApplyButtonText, Mode=OneWay}"/>
+                </StackPanel>
+            </Button>
+
+            <Button Grid.Column="5"
+                    x:Name="ReviewModeCancelButton"
+                    Click="ReviewModeCancelButton_Click"
+                    AutomationProperties.Name="{x:Bind ViewModel.ReviewModeBar.ReviewModeCancelButtonText, Mode=OneWay}"
+                    Background="{ThemeResource BrandAccentBarActionBackgroundBrush}"
+                    Foreground="{ThemeResource BrandAccentBarActionTextBrush}"
+                    BorderThickness="0"
+                    ToolTipService.ToolTip="{x:Bind ViewModel.ReviewModeBar.ReviewModeCancelButtonText, Mode=OneWay}"
+                    VerticalAlignment="Center"
+                    Margin="4,0,0,0">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <fluentIcons:FluentIcon Icon="Dismiss" IconVariant="Regular" FontSize="14"/>
+                    <TextBlock x:Name="ReviewModeCancelButtonText"
+                               Text="{x:Bind ViewModel.ReviewModeBar.ReviewModeCancelButtonText, Mode=OneWay}"/>
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <!-- Builder Mode Bar (visible while authoring a config/autounattend; shares Row 3 with the Review bar — mutually exclusive) -->
+        <Grid x:Name="BuilderModeBarGrid"
+              Grid.Row="1"
+              Background="{ThemeResource AccentFillColorDefaultBrush}"
+              Visibility="Collapsed"
+              Padding="16,10,16,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>  <!-- Icon -->
+                <ColumnDefinition Width="Auto"/>  <!-- Title -->
+                <ColumnDefinition Width="*"/>     <!-- Description (flex: expands to available width, wraps only when needed) -->
+                <ColumnDefinition Width="Auto"/>  <!-- spacer (collapses; description now takes the flex space) -->
+                <ColumnDefinition Width="Auto"/>  <!-- Target radios -->
+                <ColumnDefinition Width="Auto"/>  <!-- Save -->
+                <ColumnDefinition Width="Auto"/>  <!-- Cancel -->
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0"
+                    Width="30" Height="30"
+                    Margin="0,0,10,0"
+                    CornerRadius="9"
+                    Background="#30FFFFFF">
+                <fluentIcons:FluentIcon Icon="DocumentSave"
+                                        IconVariant="Regular"
+                                        FontSize="17"
+                                        Foreground="{ThemeResource BrandAccentBarTextBrush}"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"/>
+            </Border>
+
+            <TextBlock Grid.Column="1"
+                       Text="{x:Bind ViewModel.BuilderModeBar.BuilderModeTitleText, Mode=OneWay}"
+                       FontWeight="SemiBold"
+                       FontSize="13"
+                       Foreground="{ThemeResource BrandAccentBarTextBrush}"
+                       VerticalAlignment="Center"
+                       Margin="0,0,12,0"/>
+
+            <TextBlock Grid.Column="2"
+                       Text="{x:Bind ViewModel.BuilderModeBar.BuilderModeDescriptionText, Mode=OneWay}"
+                       FontSize="12"
+                       Foreground="{ThemeResource BrandAccentBarSecondaryTextBrush}"
+                       VerticalAlignment="Center"
+                       TextWrapping="Wrap"
+                       Margin="0,0,16,0"/>
+
+            <StackPanel Grid.Column="4"
+                        Orientation="Horizontal"
+                        Spacing="12"
+                        VerticalAlignment="Center"
+                        Margin="0,0,12,0">
+                <RadioButton x:Name="BuilderConfigRadio"
+                             GroupName="BuilderTarget"
+                             Content="{x:Bind ViewModel.BuilderModeBar.BuilderConfigTargetText, Mode=OneWay}"
+                             IsChecked="{x:Bind ViewModel.BuilderModeBar.IsConfigTarget, Mode=OneWay}"
+                             Checked="BuilderConfigRadio_Checked"
+                             Foreground="{ThemeResource BrandAccentBarTextBrush}"/>
+                <RadioButton x:Name="BuilderAutounattendRadio"
+                             GroupName="BuilderTarget"
+                             Content="{x:Bind ViewModel.BuilderModeBar.BuilderAutounattendTargetText, Mode=OneWay}"
+                             IsChecked="{x:Bind ViewModel.BuilderModeBar.IsAutounattendTarget, Mode=OneWay}"
+                             Checked="BuilderAutounattendRadio_Checked"
+                             Foreground="{ThemeResource BrandAccentBarTextBrush}"/>
+            </StackPanel>
+
+            <Button Grid.Column="5"
+                    x:Name="BuilderSaveButton"
+                    Click="BuilderSaveButton_Click"
+                    Background="{ThemeResource BrandAccentBarActionBackgroundBrush}"
+                    Foreground="{ThemeResource BrandAccentBarActionTextBrush}"
+                    BorderThickness="0"
+                    VerticalAlignment="Center"
+                    Margin="4,0,4,0">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <fluentIcons:FluentIcon Icon="DocumentSave" IconVariant="Regular" FontSize="14"/>
+                    <TextBlock Text="{x:Bind ViewModel.BuilderModeBar.BuilderSaveButtonText, Mode=OneWay}"/>
+                </StackPanel>
+            </Button>
+
+            <Button Grid.Column="6"
+                    x:Name="BuilderCancelButton"
+                    Click="BuilderCancelButton_Click"
+                    Background="{ThemeResource BrandAccentBarActionBackgroundBrush}"
+                    Foreground="{ThemeResource BrandAccentBarActionTextBrush}"
+                    BorderThickness="0"
+                    VerticalAlignment="Center"
+                    Margin="4,0,0,0">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <fluentIcons:FluentIcon Icon="Dismiss" IconVariant="Regular" FontSize="14"/>
+                    <TextBlock Text="{x:Bind ViewModel.BuilderModeBar.BuilderCancelButtonText, Mode=OneWay}"/>
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <!-- Main Content Area -->
+        <Grid Grid.Row="4"
+              x:Name="ZoomViewport"
+              Background="{ThemeResource BrandWindowBackgroundBrush}">
+            <!-- ZoomHost is inverse-sized + ScaleTransform'd by UiZoomManager for app-local zoom -->
+            <Grid x:Name="ZoomHost">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>  <!-- NavSidebar -->
+                    <ColumnDefinition Width="*"/>     <!-- Content -->
+                </Grid.ColumnDefinitions>
+
+            <!-- Custom Navigation Sidebar -->
+            <controls:NavSidebar x:Name="NavSidebar"
+                                 Grid.Column="0"
+                                 ItemClicked="NavSidebar_ItemClicked"/>
+
+            <!-- Content + Task Progress -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Content Frame for Page Navigation -->
+                <Frame x:Name="ContentFrame" Grid.Row="0"/>
+
+                <!-- Task Progress Bars (up to 3 for parallel script removal) -->
+                <StackPanel Grid.Row="1" Margin="0,2,12,8" Spacing="4">
+                    <controls:TaskProgressControl x:Name="TaskProgressControl"/>
+                    <controls:TaskProgressControl x:Name="TaskProgressControl2"/>
+                    <controls:TaskProgressControl x:Name="TaskProgressControl3"/>
+                </StackPanel>
+            </Grid>
+            </Grid>
+        </Grid>
+
+        <!-- Loading Overlay (shown during startup initialization) -->
+        <Grid x:Name="LoadingOverlay"
+              Grid.RowSpan="5"
+              Background="{ThemeResource BrandWindowBackgroundBrush}"
+              Visibility="Visible"
+              AutomationProperties.LiveSetting="Polite">
+            <Ellipse Width="520" Height="520"
+                     Margin="-360,-320,0,0"
+                     HorizontalAlignment="Left"
+                     VerticalAlignment="Top"
+                     Fill="{StaticResource BrandGradientBrush}"
+                     Opacity="0.08"
+                     IsHitTestVisible="False"/>
+            <Ellipse Width="420" Height="420"
+                     Margin="0,0,-280,-260"
+                     HorizontalAlignment="Right"
+                     VerticalAlignment="Bottom"
+                     Fill="{StaticResource BrandGradientBrush}"
+                     Opacity="0.06"
+                     IsHitTestVisible="False"/>
+
+            <Border Width="520"
+                    Padding="52,46"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource BrandPanelBrush}"
+                    BorderBrush="{ThemeResource BrandStrokeBrush}"
+                    BorderThickness="1"
+                    CornerRadius="28">
+                <StackPanel HorizontalAlignment="Stretch" Spacing="22">
+                    <StackPanel HorizontalAlignment="Center" Spacing="12">
+                        <Image x:Name="LoadingLogo"
+                               Width="92" Height="92"
+                               HorizontalAlignment="Center"/>
+                        <StackPanel HorizontalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LoadingTitleText"
+                                       HorizontalAlignment="Center"
+                                       FontSize="42"
+                                       FontWeight="SemiBold"
+                                       CharacterSpacing="-10"/>
+                            <TextBlock x:Name="LoadingTaglineText"
+                                       HorizontalAlignment="Center"
+                                       FontSize="14"
+                                       Foreground="{ThemeResource BrandTextSecondaryBrush}"/>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <Border Height="1" Background="{ThemeResource BrandStrokeBrush}"/>
+
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
+                        <TextBlock x:Name="LoadingStatusText"
+                                   Grid.Column="0"
+                                   VerticalAlignment="Center"
+                                   FontSize="13"
+                                   Foreground="{ThemeResource BrandTextSecondaryBrush}"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <ProgressRing Grid.Column="1"
+                                      IsActive="True"
+                                      Width="24" Height="24"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

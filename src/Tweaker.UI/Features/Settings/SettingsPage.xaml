@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Tweaker.UI.Features.Settings.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Tweaker.UI.Features.Settings"
+    xmlns:viewModels="using:Tweaker.UI.Features.Settings.ViewModels"
+    xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+    xmlns:fluentIcons="using:FluentIcons.WinUI">
+
+    <!-- Resources are now defined in SettingTemplates.xaml -->
+
+    <Grid Padding="{StaticResource BrandPagePadding}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>  <!-- Header -->
+            <RowDefinition Height="*"/>     <!-- Content -->
+        </Grid.RowDefinitions>
+
+        <!-- Row 0: Page Header with Icon -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*" ColumnSpacing="14">
+            <Border Style="{StaticResource BrandIconTileStyle}">
+                <fluentIcons:FluentIcon Icon="Settings"
+                                        IconVariant="Regular"
+                                        FontSize="25"
+                                        Foreground="{ThemeResource BrandAccentBrush}"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                <TextBlock
+                    Text="{x:Bind ViewModel.PageTitle, Mode=OneWay}"
+                    Style="{StaticResource BrandPageTitleTextStyle}"
+                    AutomationProperties.HeadingLevel="Level1"/>
+                <TextBlock
+                    Text="{x:Bind ViewModel.PageDescription, Mode=OneWay}"
+                    Style="{StaticResource BrandPageDescriptionTextStyle}"
+                    Margin="0,1,0,0"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Row 1: Content Container with rounded corners -->
+        <Border
+            Grid.Row="1"
+            Style="{StaticResource BrandPanelStyle}"
+            Margin="0,16,0,12">
+            <ScrollViewer
+                Padding="0,24,0,24"
+                VerticalScrollBarVisibility="Auto"
+                HorizontalScrollBarVisibility="Disabled">
+                <Grid>
+                    <StackPanel
+                        HorizontalAlignment="Stretch"
+                        MaxWidth="{StaticResource SettingsContentMaxWidth}"
+                        Margin="{StaticResource SettingsContentMargin}"
+                        Spacing="{StaticResource SettingsCardSpacing}">
+
+                        <!-- General Settings Group -->
+                        <TextBlock
+                            Text="{x:Bind ViewModel.GeneralLabel, Mode=OneWay}"
+                            Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
+
+                        <!-- Language Setting -->
+                        <controls:SettingsCard
+                            Header="{x:Bind ViewModel.LanguageHeader, Mode=OneWay}"
+                            Description="{x:Bind ViewModel.LanguageDescription, Mode=OneWay}">
+                            <controls:SettingsCard.HeaderIcon>
+                                <fluentIcons:FluentIcon Icon="LocalLanguage" IconVariant="Regular"/>
+                            </controls:SettingsCard.HeaderIcon>
+                            <ComboBox
+                                x:Name="LanguageComboBox"
+                                MinWidth="200"
+                                ItemsSource="{x:Bind ViewModel.Languages, Mode=OneWay}"
+                                SelectedValue="{x:Bind ViewModel.SelectedLanguage, Mode=TwoWay}"
+                                SelectedValuePath="Value"
+                                FlowDirection="LeftToRight">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding DisplayText}" TextReadingOrder="UseFlowDirection"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+                        </controls:SettingsCard>
+
+                        <!-- Theme Setting -->
+                        <controls:SettingsCard
+                            Header="{x:Bind ViewModel.ThemeHeader, Mode=OneWay}"
+                            Description="{x:Bind ViewModel.ThemeDescription, Mode=OneWay}">
+                            <controls:SettingsCard.HeaderIcon>
+                                <fluentIcons:FluentIcon Icon="PaintBrushSparkle" IconVariant="Regular"/>
+                            </controls:SettingsCard.HeaderIcon>
+                            <ComboBox
+                                x:Name="ThemeComboBox"
+                                MinWidth="200"
+                                ItemsSource="{x:Bind ViewModel.Themes, Mode=OneWay}"
+                                SelectedItem="{x:Bind ViewModel.SelectedThemeOption, Mode=TwoWay}"
+                                DisplayMemberPath="DisplayText"/>
+                        </controls:SettingsCard>
+
+                        <!-- Configuration Group -->
+                        <TextBlock
+                            Text="{x:Bind ViewModel.ConfigurationLabel, Mode=OneWay}"
+                            Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
+
+                        <!-- Import/Export Configuration -->
+                        <controls:SettingsCard
+                            Header="{x:Bind ViewModel.BackupRestoreHeader, Mode=OneWay}"
+                            Description="{x:Bind ViewModel.BackupRestoreDescription, Mode=OneWay}">
+                            <controls:SettingsCard.HeaderIcon>
+                                <fluentIcons:FluentIcon Icon="ArrowSync" IconVariant="Regular"/>
+                            </controls:SettingsCard.HeaderIcon>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button
+                                    Content="{x:Bind ViewModel.ImportButtonText, Mode=OneWay}"
+                                    Command="{x:Bind ViewModel.ImportConfigCommand}">
+                                    <Button.KeyboardAccelerators>
+                                        <KeyboardAccelerator Key="I" Modifiers="Control"/>
+                                    </Button.KeyboardAccelerators>
+                                </Button>
+                                <Button
+                                    Content="{x:Bind ViewModel.ExportButtonText, Mode=OneWay}"
+                                    Command="{x:Bind ViewModel.ExportConfigCommand}">
+                                    <Button.KeyboardAccelerators>
+                                        <KeyboardAccelerator Key="E" Modifiers="Control"/>
+                                    </Button.KeyboardAccelerators>
+                                </Button>
+                            </StackPanel>
+                        </controls:SettingsCard>
+
+                        <!-- System Protection Group -->
+                        <TextBlock
+                            Text="{x:Bind ViewModel.SystemProtectionLabel, Mode=OneWay}"
+                            Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
+
+                        <!-- Create Restore Point -->
+                        <controls:SettingsCard
+                            Header="{x:Bind ViewModel.SystemProtectionHeader, Mode=OneWay}"
+                            Description="{x:Bind ViewModel.SystemProtectionDescription, Mode=OneWay}">
+                            <controls:SettingsCard.HeaderIcon>
+                                <fluentIcons:FluentIcon Icon="ShieldTask" IconVariant="Regular"/>
+                            </controls:SettingsCard.HeaderIcon>
+                            <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                                <ProgressRing
+                                    IsActive="{x:Bind ViewModel.IsCreatingRestorePoint, Mode=OneWay}"
+                                    Visibility="{x:Bind ViewModel.IsCreatingRestorePoint, Mode=OneWay}"
+                                    Width="20" Height="20"/>
+                                <Button
+                                    Content="{x:Bind ViewModel.CreateRestorePointButtonText, Mode=OneWay}"
+                                    Command="{x:Bind ViewModel.CreateRestorePointCommand}"
+                                    Visibility="{x:Bind ViewModel.IsCreatingRestorePoint, Mode=OneWay, Converter={StaticResource InverseBooleanToVisibilityConverter}}"/>
+                            </StackPanel>
+                        </controls:SettingsCard>
+
+                    </StackPanel>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Page>

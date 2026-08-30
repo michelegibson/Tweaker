@@ -1,0 +1,274 @@
+using FluentAssertions;
+using Moq;
+using Tweaker.Core.Features.Common.Enums;
+using Tweaker.Core.Features.Common.Interfaces;
+using Tweaker.Core.Features.Common.Models;
+using Tweaker.UI.Features.Common.Services;
+using Xunit;
+
+namespace Tweaker.UI.Tests.Services;
+
+public class ApplicationCloseServiceTests
+{
+    private readonly Mock<ILogService> _mockLogService = new();
+    private readonly Mock<ITaskProgressService> _mockTaskProgressService = new();
+    private readonly Mock<IDialogService> _mockDialogService = new();
+
+    private bool _shutdownCalled;
+
+    private ApplicationCloseService CreateService()
+    {
+        var svc = new ApplicationCloseService(
+            _mockLogService.Object,
+            _mockTaskProgressService.Object,
+            _mockDialogService.Object);
+        // Tests must not actually terminate the test host — swap in a no-op shutdown.
+        svc.ShutdownAction = () => _shutdownCalled = true;
+        return svc;
+    }
+
+    // -------------------------------------------------------
+    // Constructor null guard tests
+    // -------------------------------------------------------
+
+    [Fact]
+    public void Constructor_WithNullLogService_ThrowsArgumentNullException()
+    {
+        var act = () => new ApplicationCloseService(
+            null!,
+            _mockTaskProgressService.Object,
+            _mockDialogService.Object);
+
+        act.Should().Throw<ArgumentNullException>().WithParameterName("logService");
+    }
+
+    [Fact]
+    public void Constructor_WithNullTaskProgressService_ThrowsArgumentNullException()
+    {
+        var act = () => new ApplicationCloseService(
+            _mockLogService.Object,
+            null!,
+            _mockDialogService.Object);
+
+        act.Should().Throw<ArgumentNullException>().WithParameterName("taskProgressService");
+    }
+
+    [Fact]
+    public void Constructor_WithNullDialogService_ThrowsArgumentNullException()
+    {
+        var act = () => new ApplicationCloseService(
+            _mockLogService.Object,
+            _mockTaskProgressService.Object,
+            null!);
+
+        act.Should().Throw<ArgumentNullException>().WithParameterName("dialogService");
+    }
+
+    // -------------------------------------------------------
+    // BeforeShutdown property
+    // -------------------------------------------------------
+
+    [Fact]
+    public void BeforeShutdown_DefaultsToNull()
+    {
+        var service = CreateService();
+        service.BeforeShutdown.Should().BeNull();
+    }
+
+    [Fact]
+    public void BeforeShutdown_CanBeSetAndRetrieved()
+    {
+        var service = CreateService();
+        Func<Task> hook = () => Task.CompletedTask;
+
+        service.BeforeShutdown = hook;
+
+        service.BeforeShutdown.Should().BeSameAs(hook);
+    }
+
+    // -------------------------------------------------------
+    // CheckOperationsAndCloseAsync - BeforeShutdown hook
+    // -------------------------------------------------------
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_WhenBeforeShutdownSet_InvokesHook()
+    {
+        var hookInvoked = false;
+        var service = CreateService();
+        service.BeforeShutdown = () =>
+        {
+            hookInvoked = true;
+            return Task.CompletedTask;
+        };
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(false);
+
+        // Application.Current.Exit() will throw in test context; catch and verify hook ran
+        try
+        {
+            await service.CheckOperationsAndCloseAsync();
+        }
+        catch
+        {
+            // Expected: Application.Current is null in unit tests
+        }
+
+        hookInvoked.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_WhenBeforeShutdownThrows_LogsErrorAndContinues()
+    {
+        var service = CreateService();
+        service.BeforeShutdown = () => throw new InvalidOperationException("Cleanup failed");
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(false);
+
+        try
+        {
+            await service.CheckOperationsAndCloseAsync();
+        }
+        catch
+        {
+            // Expected: Application.Current is null in unit tests
+        }
+
+        _mockLogService.Verify(
+            l => l.LogError(It.Is<string>(s => s.Contains("Error running cleanup tasks")), It.IsAny<Exception>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_WhenBeforeShutdownIsNull_DoesNotThrow()
+    {
+        var service = CreateService();
+        service.BeforeShutdown = null;
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(false); may throw due to Application.Current being null
+        try
+        {
+            await service.CheckOperationsAndCloseAsync();
+        }
+        catch
+        {
+            // Expected: Application.Current is null in unit tests
+        }
+
+        // No LogError for "Error running cleanup tasks" should have been called
+        _mockLogService.Verify(
+            l => l.LogError(It.Is<string>(s => s.Contains("Error running cleanup tasks")), It.IsAny<Exception>()),
+            Times.Never);
+    }
+
+    // -------------------------------------------------------
+    // CheckOperationsAndCloseAsync - Running operations
+    // -------------------------------------------------------
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_WhenTaskRunning_UserCancels_ReturnsFailedResult()
+    {
+        var service = CreateService();
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(true);
+        _mockTaskProgressService.Setup(t => t.CurrentStatusText).Returns("Installing apps");
+
+        _mockDialogService
+            .Setup(d => d.ShowConfirmationAsync(It.IsAny<ConfirmationRequest>()))
+            .ReturnsAsync(new ConfirmationResponse { Confirmed = false }); // User clicks Cancel
+
+        var result = await service.CheckOperationsAndCloseAsync();
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Be("User cancelled application close");
+    }
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_WhenTaskRunning_UserCancels_LogsCancellation()
+    {
+        var service = CreateService();
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(true);
+        _mockTaskProgressService.Setup(t => t.CurrentStatusText).Returns("Installing apps");
+
+        _mockDialogService
+            .Setup(d => d.ShowConfirmationAsync(It.IsAny<ConfirmationRequest>()))
+            .ReturnsAsync(new ConfirmationResponse { Confirmed = false });
+
+        await service.CheckOperationsAndCloseAsync();
+
+        _mockLogService.Verify(
+            l => l.LogInformation(It.Is<string>(s => s.Contains("User cancelled application close"))),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_WhenTaskRunning_UserConfirms_CancelsTask()
+    {
+        var service = CreateService();
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(true);
+        _mockTaskProgressService.Setup(t => t.CurrentStatusText).Returns("Applying settings");
+
+        _mockDialogService
+            .Setup(d => d.ShowConfirmationAsync(It.IsAny<ConfirmationRequest>()))
+            .ReturnsAsync(new ConfirmationResponse { Confirmed = true }); // User clicks Yes
+
+        try
+        {
+            await service.CheckOperationsAndCloseAsync();
+        }
+        catch
+        {
+            // Expected: Application.Current is null in unit tests
+        }
+
+        _mockTaskProgressService.Verify(t => t.CancelCurrentTask(), Times.Once);
+    }
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_WhenTaskRunning_NullStatusText_UsesDefaultMessage()
+    {
+        var service = CreateService();
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(true);
+        _mockTaskProgressService.Setup(t => t.CurrentStatusText).Returns((string?)null);
+
+        _mockDialogService
+            .Setup(d => d.ShowConfirmationAsync(
+                It.Is<ConfirmationRequest>(r => r.Message.Contains("an operation"))))
+            .ReturnsAsync(new ConfirmationResponse { Confirmed = false });
+
+        await service.CheckOperationsAndCloseAsync();
+
+        _mockDialogService.Verify(
+            d => d.ShowConfirmationAsync(
+                It.Is<ConfirmationRequest>(r => r.Message.Contains("an operation"))),
+            Times.Once);
+    }
+
+    // -------------------------------------------------------
+    // CheckOperationsAndCloseAsync - No running operations
+    // -------------------------------------------------------
+
+    [Fact]
+    public async Task CheckOperationsAndCloseAsync_NoRunningTask_DoesNotShowConfirmationDialog()
+    {
+        var service = CreateService();
+
+        _mockTaskProgressService.Setup(t => t.IsTaskRunning).Returns(false);
+
+        try
+        {
+            await service.CheckOperationsAndCloseAsync();
+        }
+        catch
+        {
+            // Expected: Application.Current is null in unit tests
+        }
+
+        _mockDialogService.Verify(
+            d => d.ShowConfirmationAsync(
+                It.Is<ConfirmationRequest>(r => r.Title.Contains("Operation in Progress"))),
+            Times.Never);
+    }
+}

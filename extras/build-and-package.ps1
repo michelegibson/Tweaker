@@ -1,0 +1,542 @@
+# build-and-package.ps1
+# Script to automate the build and installer creation process for Tweaker
+#
+# SYNOPSIS:
+# This script builds the WinUI3 Tweaker application using MSBuild and creates
+# an Inno Setup installer. It also supports code signing using certificates
+# from the Windows certificate store.
+#
+# PREREQUISITES:
+# 1. Visual Studio 2022 (or later) with the following workloads:
+#    - ".NET desktop development"
+#    - "Desktop development with C++" (MSVC tools required by WindowsAppSDK XAML compiler)
+#    The script finds MSBuild via vswhere.exe and requires both MSBuild and MSVC components.
+#
+# 2. .NET 10 SDK (net10.0-windows10.0.19041.0 target)
+#    Download: https://dotnet.microsoft.com/download/dotnet/10.0
+#
+# 3. Inno Setup 6
+#    Download: https://jrsoftware.org/isdl.php
+#    Expected at: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+#
+# 4. Windows SDK (only required for code signing)
+#    Provides signtool.exe. Install via VS Installer or standalone SDK installer.
+#
+# EXAMPLES:
+# # Basic usage (will prompt for signing)
+# .\build-and-package.ps1
+#
+# # Automatically sign with interactive certificate selection
+# .\build-and-package.ps1 -SignApplication
+#
+# # Sign with a specific certificate (if you know the thumbprint)
+# .\build-and-package.ps1 -SignApplication -CertificateThumbprint "your-certificate-thumbprint"
+#
+# # Sign with a certificate matching a subject name
+# .\build-and-package.ps1 -SignApplication -CertificateSubject "Your Company Name"
+#
+# # Create a beta version
+# .\build-and-package.ps1 -Beta
+#
+# # Skip running tests
+# .\build-and-package.ps1 -SkipTests
+param (
+    [string]$Version = (Get-Date -Format "yy.MM.dd"),
+    [string]$OutputDir = "$PSScriptRoot\..\installer-output",
+    [string]$CertificateSubject = "",
+    [string]$CertificateThumbprint = "",
+    [switch]$SignApplication = $false,
+    [switch]$Beta = $false,
+    [switch]$SkipTests = $false
+)
+
+$ErrorActionPreference = "Stop"
+$scriptRoot = $PSScriptRoot
+$solutionDir = Resolve-Path "$scriptRoot\.."
+$projectPath = "$solutionDir\src\Tweaker.UI\Tweaker.UI.csproj"
+$tfm = "net10.0-windows10.0.19041.0"
+
+# --- Network-share (SMB) repo handling -----------------------------------
+# When the repo lives on an SMB-mapped drive, MSBuild cannot reliably build
+# into the in-tree src\<proj>\bin and obj\ folders: its MakeDir-then-write
+# task ordering races the SMB redirector's namespace cache and breaks the
+# build (DirectoryNotFoundException / MSB3191 / CS2012). `dotnet test` is
+# worse - Windows flatly refuses to launch testhost.exe from a network
+# share (Win32Exception 5). The cure, identical to dev-build-and-run.ps1,
+# is to redirect every project's bin\ and obj\ to a local path under
+# %LOCALAPPDATA% via the TWEAKER_LOCAL_BUILD_ROOT env var, which both
+# src\Directory.Build.props and tests\Directory.Build.props read. The env
+# var is process-wide, so the child run-tweaker-tests.ps1 inherits it too.
+$repoRoot = "$solutionDir"
+$repoIsRemote = ($repoRoot -match '^[A-Z]:\\') -and `
+                ((Get-PSDrive ($repoRoot.Substring(0, 1)) -ErrorAction SilentlyContinue).DisplayRoot -like '\\*')
+
+if ($repoIsRemote) {
+    $localBuildRoot = Join-Path $env:LOCALAPPDATA 'Tweaker-dev\build'
+    $null = New-Item -ItemType Directory -Path $localBuildRoot -Force
+    $env:TWEAKER_LOCAL_BUILD_ROOT = $localBuildRoot
+    Write-Host "Repo on network share - redirecting build outputs to $localBuildRoot" -ForegroundColor Cyan
+
+    # Strip any leaked in-tree obj\ / bin\ on the share. If a build ever ran
+    # without the env var (Visual Studio, a bare `dotnet build`), it
+    # populated src\<proj>\obj and bin on the share. A later redirected
+    # build's default Compile glob then pulls those stale generated files
+    # in alongside the fresh ones - thousands of CS0579/CS0101/CS0111
+    # duplicate-definition errors. Empty in-tree dirs cost nothing to
+    # remove; populated ones are the bug.
+    $leakedCount = 0
+    foreach ($area in @('src', 'tests')) {
+        Get-ChildItem -Path (Join-Path $repoRoot $area) -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            foreach ($sub in @('obj', 'bin')) {
+                $stale = Join-Path $_.FullName $sub
+                if (Test-Path $stale) {
+                    if ($leakedCount -eq 0) {
+                        Write-Host "Stripping leaked in-tree obj\ / bin\ (network-share repo expects outputs under $localBuildRoot):" -ForegroundColor Cyan
+                    }
+                    Write-Host "  Removing $stale" -ForegroundColor DarkGray
+                    Remove-Item -Recurse -Force $stale
+                    $leakedCount++
+                }
+            }
+        }
+    }
+}
+
+# Function to find and select a code signing certificate
+function Get-SigningCertificate {
+    param (
+        [string]$Subject,
+        [string]$Thumbprint
+    )
+
+    # If thumbprint is provided, use it directly
+    if ($Thumbprint) {
+        $cert = Get-ChildItem -Path Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $Thumbprint }
+        if ($cert) {
+            return $cert
+        }
+        else {
+            Write-Host "Certificate with thumbprint '$Thumbprint' not found." -ForegroundColor Red
+        }
+    }
+
+    # If subject is provided, try to find matching certificates
+    if ($Subject) {
+        $certs = Get-ChildItem -Path Cert:\CurrentUser\My | Where-Object { $_.Subject -like "*$Subject*" }
+        if ($certs -and $certs.Count -gt 0) {
+            if ($certs.Count -eq 1) {
+                return $certs[0]
+            }
+            else {
+                Write-Host "Multiple certificates found with subject '$Subject'. Please select one:" -ForegroundColor Yellow
+                for ($i = 0; $i -lt $certs.Count; $i++) {
+                    Write-Host "[$i] $($certs[$i].Subject) (Thumbprint: $($certs[$i].Thumbprint))" -ForegroundColor Cyan
+                }
+                $selection = Read-Host "Enter the number of the certificate to use"
+                if ($selection -match '^\d+$' -and [int]$selection -ge 0 -and [int]$selection -lt $certs.Count) {
+                    return $certs[[int]$selection]
+                }
+                else {
+                    Write-Host "Invalid selection." -ForegroundColor Red
+                    return $null
+                }
+            }
+        }
+        else {
+            Write-Host "No certificates found with subject '$Subject'." -ForegroundColor Red
+        }
+    }
+
+    # If no certificate found yet, list all certificates and let user select
+    $certs = Get-ChildItem -Path Cert:\CurrentUser\My | Where-Object { $_.HasPrivateKey -and ($_.EnhancedKeyUsageList -and $_.EnhancedKeyUsageList.ObjectId -contains "1.3.6.1.5.5.7.3.3") }
+
+    if ($certs -and $certs.Count -gt 0) {
+        Write-Host "Available code signing certificates:" -ForegroundColor Green
+        for ($i = 0; $i -lt $certs.Count; $i++) {
+            Write-Host "[$i] $($certs[$i].Subject) (Thumbprint: $($certs[$i].Thumbprint))" -ForegroundColor Cyan
+        }
+        $selection = Read-Host "Enter the number of the certificate to use (or press Enter to skip signing)"
+        if ($selection -match '^\d+$' -and [int]$selection -ge 0 -and [int]$selection -lt $certs.Count) {
+            return $certs[[int]$selection]
+        }
+        elseif ($selection -eq "") {
+            Write-Host "Signing skipped." -ForegroundColor Yellow
+            return $null
+        }
+        else {
+            Write-Host "Invalid selection. Signing skipped." -ForegroundColor Red
+            return $null
+        }
+    }
+    else {
+        Write-Host "No code signing certificates found in your certificate store." -ForegroundColor Red
+        return $null
+    }
+}
+
+# Function to sign a file using signtool
+function Set-FileSignature {
+    param (
+        [string]$FilePath,
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+        [string]$TimestampServer = "http://timestamp.digicert.com"
+    )
+
+    if (-not $Certificate) {
+        Write-Host "No certificate provided for signing." -ForegroundColor Yellow
+        return $false
+    }
+
+    if (-not (Test-Path $FilePath)) {
+        Write-Host ("File not found: {0}" -f $FilePath) -ForegroundColor Red
+        return $false
+    }
+
+    $signtoolPath = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+    if (-not (Test-Path $signtoolPath)) {
+        # Try to find signtool in other Windows Kit directories
+        $possiblePaths = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue
+        if ($possiblePaths.Count -gt 0) {
+            $signtoolPath = $possiblePaths[0].FullName
+        }
+        else {
+            Write-Host "signtool.exe not found. Please ensure Windows SDK is installed." -ForegroundColor Red
+            return $false
+        }
+    }
+
+    Write-Host ("Signing {0}..." -f $FilePath) -ForegroundColor Cyan
+    $thumbprint = $Certificate.Thumbprint
+
+    # Sign the file using the certificate from the store
+    $signCommand = "& '$signtoolPath' sign /tr '$TimestampServer' /td sha256 /fd sha256 /sha1 $thumbprint '$FilePath'"
+
+    try {
+        $result = Invoke-Expression $signCommand
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host ("Successfully signed {0}" -f $FilePath) -ForegroundColor Green
+            return $true
+        }
+        else {
+            Write-Host ("Failed to sign {0}. Error code: {1}" -f $FilePath, $LASTEXITCODE) -ForegroundColor Red
+            Write-Host $result -ForegroundColor Red
+            return $false
+        }
+    }
+    catch {
+        Write-Host ("Error signing {0}: {1}" -f $FilePath, $_.Exception.Message) -ForegroundColor Red
+        return $false
+    }
+}
+
+# Publish output path. When the repo is on a network share the build was
+# redirected to $localBuildRoot (see "Network-share repo handling" above),
+# so Tweaker.UI's publish output lands under <root>\Tweaker.UI\bin\...
+# instead of in-tree. Match whichever location the build actually used.
+if ($repoIsRemote) {
+    $publishOutputPath = "$localBuildRoot\Tweaker.UI\bin\x64\Release\$tfm\win-x64"
+}
+else {
+    $publishOutputPath = "$solutionDir\src\Tweaker.UI\bin\x64\Release\$tfm\win-x64"
+}
+$innoSetupScript = "$scriptRoot\Tweaker.Installer.iss"
+$tempInnoScript = "$env:TEMP\Tweaker.Installer.temp.iss"
+
+# Declare certificate variable at script scope so it's accessible throughout
+$certificate = $null
+$shouldSign = $false
+
+# Ensure output directory exists
+if (-not (Test-Path $OutputDir)) {
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+}
+
+# Resolve signing certificate UP FRONT, before any subprocess runs.
+# `dotnet test` (invoked later by run-tweaker-tests.ps1) consumes stdin via
+# Invoke-Expression + Out-String, which causes the cert-selection Read-Host
+# inside Get-SigningCertificate to return empty input instantly if we do it
+# later in the script. Resolving the cert here also fails fast on cert problems
+# before spending several minutes on a build we'd throw away. The cert and
+# shouldSign state are reused by Step 4 (exe signing), Step 5/6 (Inno Setup
+# uninstaller signing), and Step 7 (installer signing) below.
+if ($SignApplication -or (Read-Host "Do you want to sign the application? (y/n)").ToLower() -eq 'y') {
+    $certificate = Get-SigningCertificate -Subject $CertificateSubject -Thumbprint $CertificateThumbprint
+    if ($certificate) {
+        Write-Host "Selected certificate: $($certificate.Subject)" -ForegroundColor Green
+        Write-Host "Thumbprint: $($certificate.Thumbprint)" -ForegroundColor Green
+        $shouldSign = $true
+    }
+    else {
+        Write-Host "No certificate selected. Continuing with unsigned build..." -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host "Skipping signing for this build..." -ForegroundColor Yellow
+}
+
+# Check for newer .NET SDK and Windows App SDK versions
+Write-Host "Checking for dependency updates..." -ForegroundColor Green
+try {
+    # Check installed .NET SDK version
+    $dotnetVersion = (& dotnet --version 2>$null)
+    if ($dotnetVersion) {
+        Write-Host "  Installed .NET SDK: $dotnetVersion" -ForegroundColor DarkGray
+    }
+} catch {
+    Write-Host "  Could not check for .NET SDK updates: $($_.Exception.Message)" -ForegroundColor DarkGray
+}
+try {
+    # Check Windows App SDK version from csproj
+    $csprojXml = [xml](Get-Content -Path "$solutionDir\src\Tweaker.UI\Tweaker.UI.csproj")
+    $wasdk = $csprojXml.Project.ItemGroup.PackageReference | Where-Object { $_.Include -eq 'Microsoft.WindowsAppSDK' }
+    if ($wasdk) {
+        $currentWasdkVersion = $wasdk.Version
+        Write-Host "  Installed Windows App SDK: $currentWasdkVersion" -ForegroundColor DarkGray
+        $nugetInfo = Invoke-RestMethod -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/index.json" -ErrorAction Stop
+        $stableVersions = $nugetInfo.versions | Where-Object { $_ -notmatch '-' } | Select-Object -Last 1
+        if ($stableVersions -and [version]$stableVersions -gt [version]$currentWasdkVersion) {
+            Write-Host "  WARNING: Newer Windows App SDK available: $stableVersions (installed: $currentWasdkVersion)" -ForegroundColor Yellow
+            Write-Host "  Update the PackageReference in Tweaker.UI.csproj" -ForegroundColor Yellow
+        } else {
+            Write-Host "  Windows App SDK is up to date." -ForegroundColor DarkGray
+        }
+    }
+} catch {
+    Write-Host "  Could not check for Windows App SDK updates: $($_.Exception.Message)" -ForegroundColor DarkGray
+}
+
+Write-Host "Building Modune v$Version..." -ForegroundColor Cyan
+
+# Modify version if Beta flag is set
+if ($Beta) {
+    # For NuGet compatibility, use proper SemVer format with prerelease tag
+    $displayVersion = "$Version-beta"
+    $nugetVersion = "$Version-beta"
+    Write-Host "Building beta version: v$displayVersion" -ForegroundColor Cyan
+}
+else {
+    $displayVersion = $Version
+    $nugetVersion = $Version
+}
+
+# Update version in csproj file.
+# Use .NET IO with explicit UTF-8-no-BOM encoding rather than
+# Get-Content -Raw / Set-Content: Set-Content appends a trailing newline on
+# every write, so the old round-trip grew the csproj by a blank line on each
+# packaging run. WriteAllText writes the string verbatim. (Same approach as
+# dev-build-and-run.ps1.)
+Write-Host "Updating version in project file..." -ForegroundColor Green
+$csprojPath = "$solutionDir\src\Tweaker.UI\Tweaker.UI.csproj"
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$csprojContent = [System.IO.File]::ReadAllText($csprojPath, [System.Text.Encoding]::UTF8)
+
+# Update version properties in csproj
+# AssemblyVersion and FileVersion must be numeric only (no -beta suffix)
+$csprojContent = $csprojContent -replace '<Version>.*?</Version>', "<Version>$nugetVersion</Version>"
+$csprojContent = $csprojContent -replace '<FileVersion>.*?</FileVersion>', "<FileVersion>$Version</FileVersion>"
+$csprojContent = $csprojContent -replace '<AssemblyVersion>.*?</AssemblyVersion>', "<AssemblyVersion>$Version</AssemblyVersion>"
+$csprojContent = $csprojContent -replace '<InformationalVersion>.*?</InformationalVersion>', "<InformationalVersion>v$displayVersion</InformationalVersion>"
+
+# Write updated csproj content (verbatim — no appended newline, no BOM)
+[System.IO.File]::WriteAllText($csprojPath, $csprojContent, $utf8NoBom)
+
+# Find MSBuild.exe (required for WinUI3/WindowsAppSDK projects)
+Write-Host "Locating MSBuild..." -ForegroundColor Green
+$msbuildPath = $null
+
+# Try vswhere.exe first (ships with VS2022+ installer)
+# Require both MSBuild and MSVC C++ tools — the WindowsAppSDK XAML compiler needs MSVC
+$vswherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswherePath) {
+    $msbuildPath = & $vswherePath -latest -requires Microsoft.Component.MSBuild -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+}
+
+# Fallback to well-known VS2022 paths
+if (-not $msbuildPath -or -not (Test-Path $msbuildPath)) {
+    $fallbackPaths = @(
+        "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+    )
+    foreach ($path in $fallbackPaths) {
+        if (Test-Path $path) {
+            $msbuildPath = $path
+            break
+        }
+    }
+}
+
+if (-not $msbuildPath -or -not (Test-Path $msbuildPath)) {
+    Write-Host "MSBuild.exe not found. Please install Visual Studio 2022 with the '.NET desktop development' workload." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Using MSBuild: $msbuildPath" -ForegroundColor Green
+
+# Step 0: Update bundled WinGet CLI and VC++ Runtime DLLs
+Write-Host "Updating bundled WinGet and VC++ Runtime DLLs..." -ForegroundColor Green
+& "$scriptRoot\Update-BundledWinGet.ps1"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to update bundled WinGet" -ForegroundColor Red
+    exit 1
+}
+
+# Step 1: Clean the solution
+Write-Host "Cleaning solution..." -ForegroundColor Green
+& $msbuildPath "$projectPath" /t:Clean /p:Configuration=Release /p:Platform=x64
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to clean solution" -ForegroundColor Red
+    exit 1
+}
+
+# Step 2: Build the solution (self-contained: .NET runtime + Windows App SDK bundled with the app)
+Write-Host "Building solution..." -ForegroundColor Green
+& $msbuildPath "$projectPath" /p:Configuration=Release /p:Platform=x64 -restore
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to build solution" -ForegroundColor Red
+    exit 1
+}
+
+# Step 3: Run tests
+if (-not $SkipTests) {
+    Write-Host "Running tests..." -ForegroundColor Green
+    & "$scriptRoot\run-tweaker-tests.ps1"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Tests failed. Fix the failing tests before building the installer." -ForegroundColor Red
+        exit 1
+    }
+}
+else {
+    Write-Host "Skipping tests (-SkipTests)..." -ForegroundColor Yellow
+}
+
+# Step 4: Sign the application executable using the cert resolved at script start
+$mainExecutable = "$publishOutputPath\Tweaker.exe"
+if ($shouldSign -and $certificate) {
+    Write-Host "Signing application executable..." -ForegroundColor Cyan
+    $signResult = Set-FileSignature -FilePath $mainExecutable -Certificate $certificate
+    if ($signResult) {
+        Write-Host "Application executable signed successfully." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Warning: Failed to sign the application. Continuing with unsigned application..." -ForegroundColor Yellow
+        # Failed exe signing disables downstream installer signing too (matches previous behavior)
+        $shouldSign = $false
+    }
+}
+else {
+    Write-Host "Skipping application signing..." -ForegroundColor Yellow
+}
+
+# Step 5: Update the InnoSetup script with correct paths
+Write-Host "Preparing InnoSetup script..." -ForegroundColor Green
+$innoContent = Get-Content -Path $innoSetupScript -Raw
+
+# Update version
+$innoContent = $innoContent -replace '#define MyAppVersion ".*"', "#define MyAppVersion `"$displayVersion`""
+# Update AppVerName to include version in the installer header
+$innoContent = $innoContent -replace 'AppVerName=Modune', "AppVerName=Modune v$displayVersion"
+
+# Change installer output filename for beta builds
+if ($Beta) {
+    $innoContent = $innoContent -replace 'OutputBaseFilename=Tweaker\.Installer', 'OutputBaseFilename=Tweaker.Installer.Beta'
+}
+
+# Update paths
+$publishPath = $publishOutputPath.Replace("\", "\\")
+$outputPath = $OutputDir.Replace("\", "\\")
+$licensePath = "$solutionDir\LICENSE.txt".Replace("\", "\\")
+$iconPath = "$solutionDir\src\Tweaker.UI\Assets\AppIcons\modune-mark.ico".Replace("\", "\\")
+
+$innoContent = $innoContent -replace 'LicenseFile=C:\\Tweaker\\LICENSE.txt', "LicenseFile=$licensePath"
+$innoContent = $innoContent -replace 'OutputDir=C:\\Tweaker\\installer-output', "OutputDir=$outputPath"
+$innoContent = $innoContent -replace 'SetupIconFile=C:\\Tweaker\\src\\Tweaker\.UI\\Assets\\AppIcons\\modune-mark\.ico', "SetupIconFile=$iconPath"
+$innoContent = $innoContent -replace 'Source: "C:\\Tweaker\\src\\Tweaker\.UI\\bin\\x64\\Release\\net10\.0-windows10\.0\.19041\.0\\win-x64\\', "Source: `"$publishPath\\"
+$innoContent = $innoContent -replace 'Source: "C:\\Tweaker\\extras\\portable\.marker"', "Source: `"$scriptRoot\\portable.marker`""
+
+# Add uninstaller signing directives if code signing is enabled
+if ($shouldSign -and $certificate) {
+    $innoContent = $innoContent -replace '(SolidCompression=yes)', "`$1`r`nSignTool=mysigntool`r`nSignedUninstaller=yes"
+}
+
+# Write the updated script to a temporary file
+Set-Content -Path $tempInnoScript -Value $innoContent
+
+# Step 6: Run the InnoSetup compiler
+Write-Host "Creating installer..." -ForegroundColor Green
+$innoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if (-not (Test-Path $innoCompiler)) {
+    Write-Host "InnoSetup compiler not found at $innoCompiler" -ForegroundColor Yellow
+    $innoCompiler = "C:\Program Files\Inno Setup 6\ISCC.exe"
+    if (-not (Test-Path $innoCompiler)) {
+        Write-Host "InnoSetup compiler not found. Please install Inno Setup 6 or update the script with the correct path." -ForegroundColor Red
+        exit 1
+    }
+}
+
+if ($shouldSign -and $certificate) {
+    # Create a temporary batch file for the sign tool command
+    # This avoids quoting issues when passing the signtool path (which contains spaces) to ISCC
+    $signBatPath = "$env:TEMP\tweaker-sign.bat"
+    $signtoolExe = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+    if (-not (Test-Path $signtoolExe)) {
+        $possiblePaths = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue
+        if ($possiblePaths.Count -gt 0) {
+            $signtoolExe = $possiblePaths[0].FullName
+        }
+    }
+    Set-Content -Path $signBatPath -Value "@`"$signtoolExe`" sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 /sha1 $($certificate.Thumbprint) %1"
+
+    Write-Host "Creating installer with signed uninstaller..." -ForegroundColor Green
+    & $innoCompiler "/Smysigntool=$signBatPath `$f" $tempInnoScript
+} else {
+    & $innoCompiler $tempInnoScript
+}
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to create installer" -ForegroundColor Red
+    exit 1
+}
+
+# Clean up
+Remove-Item $tempInnoScript -Force
+if ($signBatPath -and (Test-Path $signBatPath)) {
+    Remove-Item $signBatPath -Force
+}
+
+# Sign the installer if the executable was signed
+$installerFilename = if ($Beta) { "Tweaker.Installer.Beta.exe" } else { "Tweaker.Installer.exe" }
+$installerPath = "$OutputDir\$installerFilename"
+if ($shouldSign -and $certificate -and (Test-Path $installerPath)) {
+    Write-Host "Signing the installer..." -ForegroundColor Cyan
+    $installerSignResult = Set-FileSignature -FilePath $installerPath -Certificate $certificate
+
+    if ($installerSignResult) {
+        Write-Host "Installer successfully signed." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Warning: Failed to sign the installer." -ForegroundColor Yellow
+    }
+}
+elseif (-not $shouldSign) {
+    Write-Host "Skipping installer signing (executable was not signed)." -ForegroundColor Yellow
+}
+
+Write-Host "Build and packaging completed successfully!" -ForegroundColor Cyan
+Write-Host "Installer created at: $installerPath" -ForegroundColor Green
+
+# Display signing status summary
+if ($shouldSign) {
+    Write-Host "`nSigning Summary:" -ForegroundColor Cyan
+    Write-Host "  Certificate: $($certificate.Subject)" -ForegroundColor Green
+    Write-Host "  Executable: Signed" -ForegroundColor Green
+    Write-Host "  Uninstaller: Signed (embedded in installer)" -ForegroundColor Green
+    if ($installerSignResult) {
+        Write-Host "  Installer: Signed" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  Installer: Failed to sign" -ForegroundColor Red
+    }
+}
+else {
+    Write-Host "`nSigning Summary: No files were signed" -ForegroundColor Yellow
+}

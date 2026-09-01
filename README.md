@@ -1,3 +1,5 @@
+![Uploading 337adb3a-a3c1-46fd-9fde-b5201c9f7fc9.png…]()
+
 # Modune
 
 **Windows Control Studio** — a desktop toolkit for configuring, optimizing, and preparing Windows from one focused interface.

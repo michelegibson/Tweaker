@@ -1,4 +1,4 @@
-<img width="1878" height="905" alt="337adb3a-a3c1-46fd-9fde-b5201c9f7fc9" src="https://github.com/user-attachments/assets/0c4c71c4-4564-4149-b27e-1400127f6b40" />
+<img width="1672" height="941" alt="image_2026-09-01_19-11-16" src="https://github.com/user-attachments/assets/b0850ee9-cae5-44e7-a030-a4056a754d0d" />
 
 # Modune
 
